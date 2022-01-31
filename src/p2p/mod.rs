@@ -61,10 +61,10 @@ pub async fn create_swarm<TIpfsTypes: IpfsTypes>(
     let peer_id = options.peer_id;
 
     // Set up an encrypted TCP transport over the Mplex protocol.
-    let transport = transport::build_transport(options.keypair.clone())?;
+    let (transport, relay) = transport::build_transport(options.keypair.clone())?;
 
     // Create a Kademlia behaviour
-    let behaviour = behaviour::build_behaviour(options, repo).await;
+    let behaviour = behaviour::build_behaviour(options, repo, relay).await;
 
     // Create a Swarm
     let swarm = libp2p::swarm::SwarmBuilder::new(transport, behaviour, peer_id)

@@ -13,6 +13,7 @@ use libp2p::core::{Multiaddr, PeerId};
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::kad::record::{store::MemoryStore, Key, Record};
 use libp2p::kad::{Kademlia, KademliaConfig, KademliaEvent, Quorum};
+use libp2p::relay::Relay;
 // use libp2p::mdns::{MdnsEvent, TokioMdns};
 use libp2p::ping::{Ping, PingEvent};
 // use libp2p::swarm::toggle::Toggle;
@@ -33,6 +34,7 @@ pub struct Behaviour<Types: IpfsTypes> {
     ping: Ping,
     identify: Identify,
     pubsub: Pubsub,
+    relay: Relay,
     pub swarm: SwarmApi,
 }
 
@@ -421,7 +423,7 @@ impl<Types: IpfsTypes> NetworkBehaviourEventProcess<IdentifyEvent> for Behaviour
 
 impl<Types: IpfsTypes> Behaviour<Types> {
     /// Create a Kademlia behaviour with the IPFS bootstrap nodes.
-    pub async fn new(options: SwarmOptions, repo: Arc<Repo<Types>>) -> Self {
+    pub async fn new(options: SwarmOptions, repo: Arc<Repo<Types>>, relay: Relay) -> Self {
         info!("net: starting with peer id {}", options.peer_id);
 
         /*
@@ -472,6 +474,7 @@ impl<Types: IpfsTypes> Behaviour<Types> {
             identify,
             pubsub,
             swarm,
+            relay,
         }
     }
 
@@ -703,6 +706,7 @@ impl<Types: IpfsTypes> Behaviour<Types> {
 pub async fn build_behaviour<TIpfsTypes: IpfsTypes>(
     options: SwarmOptions,
     repo: Arc<Repo<TIpfsTypes>>,
+    relay: Relay,
 ) -> Behaviour<TIpfsTypes> {
-    Behaviour::new(options, repo).await
+    Behaviour::new(options, repo, relay).await
 }
