@@ -26,7 +26,7 @@ pub fn build_transport(keypair: identity::Keypair) -> io::Result<(TTransport, Re
         .unwrap();
     let noise_config = NoiseConfig::xx(xx_keypair).into_authenticated();
 
-    let base = TokioDnsConfig::system(TokioTcpConfig::new())?.or_transport(MemoryTransport);
+    let base = MemoryTransport.or_transport(TokioDnsConfig::system(TokioTcpConfig::new())?);
 
     let (transport, relay) = new_transport_and_behaviour(Default::default(), base);
 
