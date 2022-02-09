@@ -4,10 +4,11 @@ use crate::config::BOOTSTRAP_NODES;
 use crate::p2p::{MultiaddrWithPeerId, SwarmOptions};
 use crate::repo::{BlockPut, Repo};
 use crate::subscription::{SubscriptionFuture, SubscriptionRegistry};
-use crate::IpfsTypes;
+use crate::{IpfsTypes, Ipfs};
 use anyhow::anyhow;
 use cid::Cid;
 use ipfs_bitswap::{Bitswap, BitswapEvent};
+use libp2p::NetworkBehaviour;
 use libp2p::core::{Multiaddr, PeerId};
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::kad::record::{store::MemoryStore, Key, Record};
@@ -15,10 +16,57 @@ use libp2p::kad::{Kademlia, KademliaConfig, KademliaEvent, Quorum};
 // use libp2p::mdns::{MdnsEvent, TokioMdns};
 use libp2p::ping::{Ping, PingEvent};
 // use libp2p::swarm::toggle::Toggle;
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess};
+use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, DummyBehaviour};
 use multibase::Base;
 use std::{convert::TryInto, sync::Arc};
 use tokio::task;
+
+#[derive(libp2p::NetworkBehaviour)]
+pub struct ExtendedBehaviour<Types: IpfsTypes, Ext: NetworkBehaviour> {
+    pub(crate) inner: Behaviour<Types>,
+    custom: Ext,
+}
+
+impl<Types: IpfsTypes, Ext: NetworkBehaviour> NetworkBehaviourEventProcess<()> for ExtendedBehaviour<Types, Ext> {
+    fn inject_event(&mut self, _event: ()) {}
+}
+impl<Types: IpfsTypes, Ext: NetworkBehaviour> NetworkBehaviourEventProcess<void::Void> for ExtendedBehaviour<Types, Ext> {
+    fn inject_event(&mut self, _event: void::Void) {}
+}
+
+impl<Types: IpfsTypes, Ext: NetworkBehaviour> ExtendedBehaviour<Types, Ext> {
+    pub(crate) fn new_extended_behaviour<NExt: NetworkBehaviour>(self, new: NExt) -> ExtendedBehaviour<Types, NExt> {
+        ExtendedBehaviour {
+            inner: self.inner,
+            custom: new,
+        }
+    }
+}
+
+#[derive(Clone, Default, NetworkBehaviour)]
+pub struct NoopBehaviour {
+    inner: DummyBehaviour
+}
+
+impl NetworkBehaviourEventProcess<void::Void> for NoopBehaviour {
+    fn inject_event(&mut self, _event: void::Void) {}
+}
+
+pub trait ExtendedBehaviourBuilder<Types: IpfsTypes, Ext: NetworkBehaviour> {
+    /// Build method for your NetworkBehaviour implementation if your behaviour needs access to IPFS at runtime.
+    /// 
+    /// The IPFS object will be uninitialised until started with ExtendedUninitialisedIpfs::start
+    fn build(self, ipfs: Ipfs<Types>) -> Ext;
+}
+
+impl<Types: IpfsTypes> ExtendedBehaviour<Types, NoopBehaviour> {
+    pub fn new(options: SwarmOptions, repo: Arc<Repo<Types>>) -> Self {
+        Self {
+            inner: Behaviour::new(options, repo),
+            custom: NoopBehaviour::default(),
+        }
+    }
+}
 
 /// Behaviour type.
 #[derive(libp2p::NetworkBehaviour)]
@@ -421,7 +469,7 @@ impl<Types: IpfsTypes> NetworkBehaviourEventProcess<IdentifyEvent> for Behaviour
 
 impl<Types: IpfsTypes> Behaviour<Types> {
     /// Create a Kademlia behaviour with the IPFS bootstrap nodes.
-    pub async fn new(options: SwarmOptions, repo: Arc<Repo<Types>>) -> Self {
+    pub fn new(options: SwarmOptions, repo: Arc<Repo<Types>>) -> Self {
         info!("net: starting with peer id {}", options.peer_id);
 
         /*
@@ -697,12 +745,4 @@ impl<Types: IpfsTypes> Behaviour<Types> {
 
         Ok(ret)
     }
-}
-
-/// Create a IPFS behaviour with the IPFS bootstrap nodes.
-pub async fn build_behaviour<TIpfsTypes: IpfsTypes>(
-    options: SwarmOptions,
-    repo: Arc<Repo<TIpfsTypes>>,
-) -> Behaviour<TIpfsTypes> {
-    Behaviour::new(options, repo).await
 }
