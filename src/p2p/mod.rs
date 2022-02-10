@@ -22,6 +22,8 @@ pub use {
 
 /// Type alias for [`libp2p::Swarm`] running the [`behaviour::Behaviour`] with the given [`IpfsTypes`].
 pub type TSwarm<T> = Swarm<Behaviour<T, NoopBehaviour>>;
+/// Type alias for [`libp2p::Swarm`] running the [`behaviour::Behaviour`] with the given [`IpfsTypes`],
+/// and a custom [`libp2p::swarm::NetworkBehaviour`].
 pub type TCustomSwarm<T, Custom> = Swarm<Behaviour<T, Custom>>;
 
 /// Defines the configuration for an IPFS swarm.
