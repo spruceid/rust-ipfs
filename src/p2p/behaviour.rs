@@ -22,6 +22,10 @@ use multibase::Base;
 use std::{convert::TryInto, sync::Arc};
 use tokio::task;
 
+/// A "do-nothing" behaviour.
+/// 
+/// This is the default "custom" behaviour for Ipfs. This is replaced by supplying a custom
+/// behaviour to the [UninitializedIpfs](`crate::UninitializedIpfs`).
 #[derive(Clone, Default, NetworkBehaviour)]
 pub struct NoopBehaviour {
     inner: DummyBehaviour
@@ -31,6 +35,7 @@ impl NetworkBehaviourEventProcess<void::Void> for NoopBehaviour {
     fn inject_event(&mut self, _event: void::Void) {}
 }
 
+/// Enables the building of custom NetworkBehaviours which need access to the Ipfs interface.
 pub trait CustomBehaviourBuilder<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     /// Build method for your NetworkBehaviour implementation if your behaviour needs access to IPFS at runtime.
     /// 

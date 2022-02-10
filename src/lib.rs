@@ -197,6 +197,10 @@ impl IpfsOptions {
             span: None,
         }
     }
+
+    pub fn create_uninitialised_ipfs<Types: IpfsTypes>(self) -> UninitializedIpfs<Types> {
+        UninitializedIpfs::new(self)
+    }
 }
 
 /// Workaround for libp2p::identity::Keypair missing a Debug impl, works with references and owned
@@ -253,7 +257,7 @@ type Channel<T> = OneshotSender<Result<T, Error>>;
 /// Events used internally to communicate with the swarm, which is executed in the the background
 /// task.
 #[derive(Debug)]
-enum IpfsEvent {
+pub enum IpfsEvent {
     /// Connect
     Connect(
         MultiaddrWithPeerId,
@@ -311,6 +315,9 @@ enum IpfsEvent {
     Exit,
 }
 
+/// The general representation of the builder for Ipfs<Types>.
+/// 
+/// For the default representation without any custom NetworkBehaviours, see [UninitializedIpfs](`crate::UninitializedIpfs`).
 pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     behaviour: p2p::Behaviour<Types, Custom>,
     ipfs_event_channel: (Sender<IpfsEvent>, Receiver<IpfsEvent>),
@@ -320,6 +327,7 @@ pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<
     repo_events: Receiver<RepoEvent>,
 }
 
+/// The default builder for Ipfs<Types> without any custom NetworkBehaviours.
 pub type UninitializedIpfs<Types> = UninitializedExtendedIpfs<Types, p2p::NoopBehaviour>;
 
 impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
@@ -339,11 +347,11 @@ impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
         let channel = channel::<IpfsEvent>(1);
 
         Self {
-            behaviour: p2p::Behaviour::new(swarm_options, arc_repo),
+            behaviour: p2p::Behaviour::new(swarm_options, arc_repo.clone()),
             ipfs_event_channel: channel,
             keys,
             options: options,
-            repo: arc_repo.clone(),
+            repo: arc_repo,
             repo_events,
         }
     }
@@ -352,6 +360,10 @@ impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
 impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
     UninitializedExtendedIpfs<Types, Behaviour>
 {
+    /// Set a custom [NetworkBehaviour](`libp2p::swarm::NetworkBehaviour`) for the Ipfs swarm.
+    /// 
+    /// Custom behaviours must have an [OutEvent](`libp2p::swarm::NetworkBehaviour::OutEvent`)
+    /// of `()`.
     pub fn with_extended_behaviour<Custom: NetworkBehaviour<OutEvent = ()>>(
         self,
         behaviour: Custom,
@@ -366,6 +378,11 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         }
     }
 
+    /// Set a custom [NetworkBehaviour](`libp2p::swarm::NetworkBehaviour`) for the Ipfs swarm from
+    /// a [CustomBehaviourBuilder](`crate::p2p::CustomBehaviourBuilder`).
+    /// 
+    /// Custom behaviours must have an [OutEvent](`libp2p::swarm::NetworkBehaviour::OutEvent`)
+    /// of `()`.
     pub fn with_extended_behaviour_from_builder<Custom, CustomBuilder>(
         self,
         behaviour_builder: CustomBuilder,
@@ -384,11 +401,12 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
             repo_events: self.repo_events,
         }
     }
+
     /// Initialize the ipfs node. The returned `Ipfs` value is cloneable, send and sync, and the
     /// future should be spawned on an executor as soon as possible.
     ///
     /// The future returned from this method should not need
-    /// (instrumenting)[`tracing_futures::Instrument::instrument`] as the [`IpfsOptions::span`]
+    /// [instrumenting](`tracing_futures::Instrument::instrument`) as the [`IpfsOptions::span`]
     /// will be used as parent span for all of the awaited and created futures.
     pub async fn start(self) -> Result<(Ipfs<Types>, impl Future<Output = ()>), Error> {
         use futures::stream::StreamExt;
