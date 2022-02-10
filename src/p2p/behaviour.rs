@@ -21,28 +21,6 @@ use multibase::Base;
 use std::{convert::TryInto, sync::Arc};
 use tokio::task;
 
-#[derive(libp2p::NetworkBehaviour)]
-pub struct ExtendedBehaviour<Types: IpfsTypes, Ext: NetworkBehaviour> {
-    pub(crate) inner: Behaviour<Types>,
-    custom: Ext,
-}
-
-impl<Types: IpfsTypes, Ext: NetworkBehaviour> NetworkBehaviourEventProcess<()> for ExtendedBehaviour<Types, Ext> {
-    fn inject_event(&mut self, _event: ()) {}
-}
-impl<Types: IpfsTypes, Ext: NetworkBehaviour> NetworkBehaviourEventProcess<void::Void> for ExtendedBehaviour<Types, Ext> {
-    fn inject_event(&mut self, _event: void::Void) {}
-}
-
-impl<Types: IpfsTypes, Ext: NetworkBehaviour> ExtendedBehaviour<Types, Ext> {
-    pub(crate) fn new_extended_behaviour<NExt: NetworkBehaviour>(self, new: NExt) -> ExtendedBehaviour<Types, NExt> {
-        ExtendedBehaviour {
-            inner: self.inner,
-            custom: new,
-        }
-    }
-}
-
 #[derive(Clone, Default, NetworkBehaviour)]
 pub struct NoopBehaviour {
     inner: DummyBehaviour
@@ -52,25 +30,16 @@ impl NetworkBehaviourEventProcess<void::Void> for NoopBehaviour {
     fn inject_event(&mut self, _event: void::Void) {}
 }
 
-pub trait ExtendedBehaviourBuilder<Types: IpfsTypes, Ext: NetworkBehaviour> {
+pub trait CustomBehaviourBuilder<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     /// Build method for your NetworkBehaviour implementation if your behaviour needs access to IPFS at runtime.
     /// 
     /// The IPFS object will be uninitialised until started with ExtendedUninitialisedIpfs::start
-    fn build(self, ipfs: Ipfs<Types>) -> Ext;
-}
-
-impl<Types: IpfsTypes> ExtendedBehaviour<Types, NoopBehaviour> {
-    pub fn new(options: SwarmOptions, repo: Arc<Repo<Types>>) -> Self {
-        Self {
-            inner: Behaviour::new(options, repo),
-            custom: NoopBehaviour::default(),
-        }
-    }
+    fn build(self, ipfs: Ipfs<Types>) -> Custom;
 }
 
 /// Behaviour type.
 #[derive(libp2p::NetworkBehaviour)]
-pub struct Behaviour<Types: IpfsTypes> {
+pub struct Behaviour<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     #[behaviour(ignore)]
     repo: Arc<Repo<Types>>,
     // mdns: Toggle<TokioMdns>,
@@ -82,6 +51,7 @@ pub struct Behaviour<Types: IpfsTypes> {
     identify: Identify,
     pubsub: Pubsub,
     pub swarm: SwarmApi,
+    custom: Custom,
 }
 
 /// Represents the result of a Kademlia query.
@@ -95,10 +65,10 @@ pub enum KadResult {
     Records(Vec<Record>),
 }
 
-impl<Types: IpfsTypes> NetworkBehaviourEventProcess<()> for Behaviour<Types> {
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviourEventProcess<()> for Behaviour<Types, Custom> {
     fn inject_event(&mut self, _event: ()) {}
 }
-impl<Types: IpfsTypes> NetworkBehaviourEventProcess<void::Void> for Behaviour<Types> {
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviourEventProcess<void::Void> for Behaviour<Types, Custom> {
     fn inject_event(&mut self, _event: void::Void) {}
 }
 
@@ -123,7 +93,7 @@ impl<Types: IpfsTypes> NetworkBehaviourEventProcess<MdnsEvent> for Behaviour<Typ
 }
 */
 
-impl<Types: IpfsTypes> NetworkBehaviourEventProcess<KademliaEvent> for Behaviour<Types> {
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviourEventProcess<KademliaEvent> for Behaviour<Types, Custom> {
     fn inject_event(&mut self, event: KademliaEvent) {
         use libp2p::kad::{
             AddProviderError, AddProviderOk, BootstrapError, BootstrapOk, GetClosestPeersError,
@@ -367,7 +337,7 @@ impl<Types: IpfsTypes> NetworkBehaviourEventProcess<KademliaEvent> for Behaviour
     }
 }
 
-impl<Types: IpfsTypes> NetworkBehaviourEventProcess<BitswapEvent> for Behaviour<Types> {
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviourEventProcess<BitswapEvent> for Behaviour<Types, Custom> {
     fn inject_event(&mut self, event: BitswapEvent) {
         match event {
             BitswapEvent::ReceivedBlock(peer_id, block) => {
@@ -423,7 +393,7 @@ impl<Types: IpfsTypes> NetworkBehaviourEventProcess<BitswapEvent> for Behaviour<
     }
 }
 
-impl<Types: IpfsTypes> NetworkBehaviourEventProcess<PingEvent> for Behaviour<Types> {
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviourEventProcess<PingEvent> for Behaviour<Types, Custom> {
     fn inject_event(&mut self, event: PingEvent) {
         use libp2p::ping::handler::{PingFailure, PingSuccess};
         match event {
@@ -461,13 +431,13 @@ impl<Types: IpfsTypes> NetworkBehaviourEventProcess<PingEvent> for Behaviour<Typ
     }
 }
 
-impl<Types: IpfsTypes> NetworkBehaviourEventProcess<IdentifyEvent> for Behaviour<Types> {
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviourEventProcess<IdentifyEvent> for Behaviour<Types, Custom> {
     fn inject_event(&mut self, event: IdentifyEvent) {
         trace!("identify: {:?}", event);
     }
 }
 
-impl<Types: IpfsTypes> Behaviour<Types> {
+impl<Types: IpfsTypes> Behaviour<Types, NoopBehaviour> {
     /// Create a Kademlia behaviour with the IPFS bootstrap nodes.
     pub fn new(options: SwarmOptions, repo: Arc<Repo<Types>>) -> Self {
         info!("net: starting with peer id {}", options.peer_id);
@@ -520,6 +490,23 @@ impl<Types: IpfsTypes> Behaviour<Types> {
             identify,
             pubsub,
             swarm,
+            custom:  NoopBehaviour::default(),
+        }
+    }
+}
+
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> Behaviour<Types, Custom> {
+    pub(crate) fn new_custom_behaviour<New: NetworkBehaviour<OutEvent = ()>>(self, new: New) -> Behaviour<Types, New> {
+        Behaviour {
+            repo: self.repo,
+            kademlia: self.kademlia,
+            kad_subscriptions: self.kad_subscriptions,
+            bitswap: self.bitswap,
+            ping: self.ping,
+            identify: self.identify,
+            pubsub: self.pubsub,
+            swarm: self.swarm,
+            custom: new,
         }
     }
 
