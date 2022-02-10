@@ -1,11 +1,10 @@
 //! P2P handling for IPFS nodes.
-use crate::repo::Repo;
 use crate::{IpfsOptions, IpfsTypes};
 use libp2p::identity::Keypair;
+use libp2p::swarm::NetworkBehaviour;
 use libp2p::Swarm;
 use libp2p::{Multiaddr, PeerId};
 use std::io;
-use std::sync::Arc;
 use tracing::Span;
 
 pub(crate) mod addr;
@@ -15,10 +14,17 @@ mod swarm;
 mod transport;
 
 pub use addr::{MultiaddrWithPeerId, MultiaddrWithoutPeerId};
-pub use {behaviour::KadResult, swarm::Connection};
+
+pub use {
+    behaviour::{Behaviour, CustomBehaviourBuilder, KadResult, NoopBehaviour},
+    swarm::Connection,
+};
 
 /// Type alias for [`libp2p::Swarm`] running the [`behaviour::Behaviour`] with the given [`IpfsTypes`].
-pub type TSwarm<T> = Swarm<behaviour::Behaviour<T>>;
+pub type TSwarm<T> = Swarm<Behaviour<T, NoopBehaviour>>;
+/// Type alias for [`libp2p::Swarm`] running the [`behaviour::Behaviour`] with the given [`IpfsTypes`],
+/// and a custom [`libp2p::swarm::NetworkBehaviour`].
+pub type TCustomSwarm<T, Custom> = Swarm<Behaviour<T, Custom>>;
 
 /// Defines the configuration for an IPFS swarm.
 pub struct SwarmOptions {
@@ -53,18 +59,15 @@ impl From<&IpfsOptions> for SwarmOptions {
 }
 
 /// Creates a new IPFS swarm.
-pub async fn create_swarm<TIpfsTypes: IpfsTypes>(
+pub fn create_swarm<TIpfsTypes: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>>(
     options: SwarmOptions,
     span: Span,
-    repo: Arc<Repo<TIpfsTypes>>,
-) -> io::Result<TSwarm<TIpfsTypes>> {
+    behaviour: Behaviour<TIpfsTypes, Custom>,
+) -> io::Result<TCustomSwarm<TIpfsTypes, Custom>> {
     let peer_id = options.peer_id;
 
     // Set up an encrypted TCP transport over the Mplex protocol.
     let transport = transport::build_transport(options.keypair.clone())?;
-
-    // Create a Kademlia behaviour
-    let behaviour = behaviour::build_behaviour(options, repo).await;
 
     // Create a Swarm
     let swarm = libp2p::swarm::SwarmBuilder::new(transport, behaviour, peer_id)
