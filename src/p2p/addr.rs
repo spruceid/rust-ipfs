@@ -44,11 +44,16 @@ impl TryFrom<Multiaddr> for MultiaddrWithoutPeerId {
     type Error = MultiaddrWrapperError;
 
     fn try_from(addr: Multiaddr) -> Result<Self, Self::Error> {
-        if addr.iter().any(|p| matches!(p, Protocol::P2p(_))) {
-            Err(MultiaddrWrapperError::ContainsProtocolP2p)
-        } else {
-            Ok(Self(addr))
-        }
+        // TODO: replace MultiaddrWithoutPeerId's with Multiaddr in this codebase where it makes
+        // sense so that this block can be uncommented. For now the network behaviour functions
+        // can inject Multiaddr which are a `/p2p/<peer-id>`.
+
+        //if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+        //    Err(MultiaddrWrapperError::ContainsProtocolP2p)
+        //} else {
+        //    Ok(Self(addr))
+        //}
+        Ok(Self(addr))
     }
 }
 
@@ -127,27 +132,9 @@ impl From<MultiaddrWithPeerId> for Multiaddr {
 impl TryFrom<Multiaddr> for MultiaddrWithPeerId {
     type Error = MultiaddrWrapperError;
 
-    fn try_from(multiaddr: Multiaddr) -> Result<Self, Self::Error> {
-        if let Some(Protocol::P2p(hash)) = multiaddr.iter().find(|p| matches!(p, Protocol::P2p(_)))
-        {
-            // FIXME: we've had a case where the PeerId was not the last part of the Multiaddr, which
-            // is unexpected; it is hard to trigger, hence this debug-only assertion so we might be
-            // able to catch it sometime during tests
-            debug_assert!(
-                matches!(
-                    multiaddr.iter().last(),
-                    Some(Protocol::P2p(_)) | Some(Protocol::P2pCircuit)
-                ),
-                "unexpected Multiaddr format: {}",
-                multiaddr
-            );
-
-            let multiaddr = MultiaddrWithoutPeerId(
-                multiaddr
-                    .into_iter()
-                    .filter(|p| !matches!(p, Protocol::P2p(_) | Protocol::P2pCircuit))
-                    .collect(),
-            );
+    fn try_from(mut multiaddr: Multiaddr) -> Result<Self, Self::Error> {
+        if let Some(Protocol::P2p(hash)) = multiaddr.pop() {
+            let multiaddr = MultiaddrWithoutPeerId::try_from(multiaddr)?;
             let peer_id =
                 PeerId::from_multihash(hash).map_err(|_| MultiaddrWrapperError::InvalidPeerId)?;
             Ok(Self { multiaddr, peer_id })
