@@ -16,13 +16,13 @@ mod transport;
 pub use addr::{MultiaddrWithPeerId, MultiaddrWithoutPeerId};
 
 pub use {
-    behaviour::{Behaviour, ExtendedBehaviour, ExtendedBehaviourBuilder, KadResult, NoopBehaviour},
+    behaviour::{Behaviour, CustomBehaviourBuilder, KadResult, NoopBehaviour},
     swarm::Connection,
 };
 
 /// Type alias for [`libp2p::Swarm`] running the [`behaviour::Behaviour`] with the given [`IpfsTypes`].
-pub type TSwarm<T> = Swarm<ExtendedBehaviour<T, NoopBehaviour>>;
-pub type TExtendedSwarm<T, Ext> = Swarm<ExtendedBehaviour<T, Ext>>;
+pub type TSwarm<T> = Swarm<Behaviour<T, NoopBehaviour>>;
+pub type TCustomSwarm<T, Custom> = Swarm<Behaviour<T, Custom>>;
 
 /// Defines the configuration for an IPFS swarm.
 pub struct SwarmOptions {
@@ -57,11 +57,11 @@ impl From<&IpfsOptions> for SwarmOptions {
 }
 
 /// Creates a new IPFS swarm.
-pub fn create_swarm<TIpfsTypes: IpfsTypes, Ext: NetworkBehaviour<OutEvent = ()>>(
+pub fn create_swarm<TIpfsTypes: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>>(
     options: SwarmOptions,
     span: Span,
-    behaviour: ExtendedBehaviour<TIpfsTypes, Ext>,
-) -> io::Result<TExtendedSwarm<TIpfsTypes, Ext>> {
+    behaviour: Behaviour<TIpfsTypes, Custom>,
+) -> io::Result<TCustomSwarm<TIpfsTypes, Custom>> {
     let peer_id = options.peer_id;
 
     // Set up an encrypted TCP transport over the Mplex protocol.

@@ -47,7 +47,7 @@ use futures::{
     stream::{Fuse, Stream},
 };
 use libp2p::swarm::NetworkBehaviour;
-use p2p::{ExtendedBehaviourBuilder, TExtendedSwarm};
+use p2p::{CustomBehaviourBuilder, TCustomSwarm};
 use tracing::Span;
 use tracing_futures::Instrument;
 
@@ -308,7 +308,7 @@ enum IpfsEvent {
 
 pub type UninitializedIpfs<Types> = UninitializedExtendedIpfs<Types, p2p::NoopBehaviour>;
 
-impl<Types: IpfsTypes> UninitializedIpfs<Types> {
+impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
     /// Configures a new UninitializedIpfs with from the given options and optionally a span.
     /// If the span is not given, it is defaulted to `tracing::trace_span!("ipfs")`.
     ///
@@ -339,54 +339,54 @@ impl<Types: IpfsTypes> UninitializedIpfs<Types> {
             ipfs,
             receiver,
             repo_events,
-            behaviour: p2p::ExtendedBehaviour::new(swarm_options, arc_repo),
+            behaviour: p2p::Behaviour::new(swarm_options, arc_repo),
             options: options,
         }
     }
 }
 
-pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Behaviour: NetworkBehaviour> {
+pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     repo: Arc<Repo<Types>>,
     ipfs: Ipfs<Types>,
     receiver: Receiver<IpfsEvent>,
     repo_events: Receiver<RepoEvent>,
-    behaviour: p2p::ExtendedBehaviour<Types, Behaviour>,
+    behaviour: p2p::Behaviour<Types, Custom>,
     options: IpfsOptions,
 }
 
 impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
     UninitializedExtendedIpfs<Types, Behaviour>
 {
-    pub fn with_extended_behaviour<Ext: NetworkBehaviour>(
+    pub fn with_extended_behaviour<Custom: NetworkBehaviour<OutEvent = ()>>(
         self,
-        behaviour: Ext,
-    ) -> UninitializedExtendedIpfs<Types, Ext> {
+        behaviour: Custom,
+    ) -> UninitializedExtendedIpfs<Types, Custom> {
         UninitializedExtendedIpfs {
             repo: self.repo,
             ipfs: self.ipfs,
             receiver: self.receiver,
             repo_events: self.repo_events,
-            behaviour: self.behaviour.new_extended_behaviour(behaviour),
             options: self.options,
+            behaviour: self.behaviour.new_custom_behaviour(behaviour),
         }
     }
 
-    pub fn with_extended_behaviour_from_builder<Ext, ExtBuilder>(
+    pub fn with_extended_behaviour_from_builder<Custom, CustomBuilder>(
         self,
-        behaviour_builder: ExtBuilder,
-    ) -> UninitializedExtendedIpfs<Types, Ext>
+        behaviour_builder: CustomBuilder,
+    ) -> UninitializedExtendedIpfs<Types, Custom>
     where
-        Ext: NetworkBehaviour<OutEvent = ()>,
-        ExtBuilder: ExtendedBehaviourBuilder<Types, Ext>,
+        Custom: NetworkBehaviour<OutEvent = ()>,
+        CustomBuilder: CustomBehaviourBuilder<Types, Custom>,
     {
-        let behaviour = behaviour_builder.build(self.ipfs.clone());
+        let custom = behaviour_builder.build(self.ipfs.clone());
         UninitializedExtendedIpfs {
             repo: self.repo,
             ipfs: self.ipfs,
             receiver: self.receiver,
             repo_events: self.repo_events,
-            behaviour: self.behaviour.new_extended_behaviour(behaviour),
             options: self.options,
+            behaviour: self.behaviour.new_custom_behaviour(custom),
         }
     }
     /// Initialize the ipfs node. The returned `Ipfs` value is cloneable, send and sync, and the
@@ -435,7 +435,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
             listening_addrs, ..
         } = options;
 
-        let mut fut = IpfsFuture {
+        let mut fut: IpfsFuture<Types, Behaviour> = IpfsFuture {
             repo_events: repo_events.fuse(),
             from_facade: receiver.fuse(),
             swarm,
@@ -1268,7 +1268,7 @@ impl<Types: IpfsTypes> Ipfs<Types> {
 /// Background task of `Ipfs` created when calling `UninitializedIpfs::start`.
 // The receivers are Fuse'd so that we don't have to manage state on them being exhausted.
 struct IpfsFuture<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> {
-    swarm: TExtendedSwarm<Types, Behaviour>,
+    swarm: TCustomSwarm<Types, Behaviour>,
     repo_events: Fuse<Receiver<RepoEvent>>,
     from_facade: Fuse<Receiver<IpfsEvent>>,
     listening_addresses: HashMap<Multiaddr, (ListenerId, Option<Channel<Multiaddr>>)>,
@@ -1446,11 +1446,11 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
 
                 match inner {
                     IpfsEvent::Connect(target, ret) => {
-                        ret.send(self.swarm.behaviour_mut().inner.connect(target))
+                        ret.send(self.swarm.behaviour_mut().connect(target))
                             .ok();
                     }
                     IpfsEvent::Addresses(ret) => {
-                        let addrs = self.swarm.behaviour_mut().inner.addrs();
+                        let addrs = self.swarm.behaviour_mut().addrs();
                         ret.send(Ok(addrs)).ok();
                     }
                     IpfsEvent::Listeners(ret) => {
@@ -1458,12 +1458,12 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         ret.send(Ok(listeners)).ok();
                     }
                     IpfsEvent::Connections(ret) => {
-                        let connections = self.swarm.behaviour_mut().inner.connections();
+                        let connections = self.swarm.behaviour_mut().connections();
                         ret.send(Ok(connections.collect())).ok();
                     }
                     IpfsEvent::Disconnect(addr, ret) => {
                         if let Some(disconnector) =
-                            self.swarm.behaviour_mut().inner.disconnect(addr)
+                            self.swarm.behaviour_mut().disconnect(addr)
                         {
                             disconnector.disconnect(&mut self.swarm);
                         }
@@ -1480,16 +1480,16 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                     }
                     IpfsEvent::PubsubSubscribe(topic, ret) => {
                         let _ =
-                            ret.send(self.swarm.behaviour_mut().inner.pubsub().subscribe(topic));
+                            ret.send(self.swarm.behaviour_mut().pubsub().subscribe(topic));
                     }
                     IpfsEvent::PubsubUnsubscribe(topic, ret) => {
                         let _ =
-                            ret.send(self.swarm.behaviour_mut().inner.pubsub().unsubscribe(topic));
+                            ret.send(self.swarm.behaviour_mut().pubsub().unsubscribe(topic));
                     }
                     IpfsEvent::PubsubPublish(topic, data, ret) => {
                         self.swarm
                             .behaviour_mut()
-                            .inner
+                            
                             .pubsub()
                             .publish(topic, data);
                         let _ = ret.send(());
@@ -1499,19 +1499,19 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let _ = ret.send(
                             self.swarm
                                 .behaviour_mut()
-                                .inner
+                                
                                 .pubsub()
                                 .subscribed_peers(&topic),
                         );
                     }
                     IpfsEvent::PubsubPeers(None, ret) => {
-                        let _ = ret.send(self.swarm.behaviour_mut().inner.pubsub().known_peers());
+                        let _ = ret.send(self.swarm.behaviour_mut().pubsub().known_peers());
                     }
                     IpfsEvent::PubsubSubscribed(ret) => {
                         let _ = ret.send(
                             self.swarm
                                 .behaviour_mut()
-                                .inner
+                                
                                 .pubsub()
                                 .subscribed_topics(),
                         );
@@ -1520,19 +1520,19 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let list = if let Some(peer) = peer {
                             self.swarm
                                 .behaviour_mut()
-                                .inner
+                                
                                 .bitswap()
                                 .peer_wantlist(&peer)
                                 .unwrap_or_default()
                         } else {
-                            self.swarm.behaviour_mut().inner.bitswap().local_wantlist()
+                            self.swarm.behaviour_mut().bitswap().local_wantlist()
                         };
                         let _ = ret.send(list);
                     }
                     IpfsEvent::BitswapStats(ret) => {
-                        let stats = self.swarm.behaviour_mut().inner.bitswap().stats();
-                        let peers = self.swarm.behaviour_mut().inner.bitswap().peers();
-                        let wantlist = self.swarm.behaviour_mut().inner.bitswap().local_wantlist();
+                        let stats = self.swarm.behaviour_mut().bitswap().stats();
+                        let peers = self.swarm.behaviour_mut().bitswap().peers();
+                        let wantlist = self.swarm.behaviour_mut().bitswap().local_wantlist();
                         let _ = ret.send((stats, peers, wantlist).into());
                     }
                     IpfsEvent::AddListeningAddress(addr, ret) => {
@@ -1556,21 +1556,21 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let _ = ret.send(removed);
                     }
                     IpfsEvent::Bootstrap(ret) => {
-                        let future = self.swarm.behaviour_mut().inner.bootstrap();
+                        let future = self.swarm.behaviour_mut().bootstrap();
                         let _ = ret.send(future);
                     }
                     IpfsEvent::AddPeer(peer_id, addr) => {
-                        self.swarm.behaviour_mut().inner.add_peer(peer_id, addr);
+                        self.swarm.behaviour_mut().add_peer(peer_id, addr);
                     }
                     IpfsEvent::GetClosestPeers(peer_id, ret) => {
-                        let future = self.swarm.behaviour_mut().inner.get_closest_peers(peer_id);
+                        let future = self.swarm.behaviour_mut().get_closest_peers(peer_id);
                         let _ = ret.send(future);
                     }
                     IpfsEvent::GetBitswapPeers(ret) => {
                         let peers = self
                             .swarm
                             .behaviour_mut()
-                            .inner
+                            
                             .bitswap()
                             .connected_peers
                             .keys()
@@ -1582,7 +1582,7 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let swarm_addrs = self
                             .swarm
                             .behaviour_mut()
-                            .inner
+                            
                             .swarm
                             .connections_to(&peer_id);
                         let locally_known_addrs = if !swarm_addrs.is_empty() {
@@ -1590,7 +1590,7 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         } else {
                             self.swarm
                                 .behaviour_mut()
-                                .inner
+                                
                                 .kademlia()
                                 .addresses_of_peer(&peer_id)
                         };
@@ -1598,44 +1598,44 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                             Either::Left(locally_known_addrs)
                         } else {
                             Either::Right(
-                                self.swarm.behaviour_mut().inner.get_closest_peers(peer_id),
+                                self.swarm.behaviour_mut().get_closest_peers(peer_id),
                             )
                         };
                         let _ = ret.send(addrs);
                     }
                     IpfsEvent::GetProviders(cid, ret) => {
-                        let future = self.swarm.behaviour_mut().inner.get_providers(cid);
+                        let future = self.swarm.behaviour_mut().get_providers(cid);
                         let _ = ret.send(future);
                     }
                     IpfsEvent::Provide(cid, ret) => {
-                        let _ = ret.send(self.swarm.behaviour_mut().inner.start_providing(cid));
+                        let _ = ret.send(self.swarm.behaviour_mut().start_providing(cid));
                     }
                     IpfsEvent::DhtGet(key, quorum, ret) => {
-                        let future = self.swarm.behaviour_mut().inner.dht_get(key, quorum);
+                        let future = self.swarm.behaviour_mut().dht_get(key, quorum);
                         let _ = ret.send(future);
                     }
                     IpfsEvent::DhtPut(key, value, quorum, ret) => {
-                        let future = self.swarm.behaviour_mut().inner.dht_put(key, value, quorum);
+                        let future = self.swarm.behaviour_mut().dht_put(key, value, quorum);
                         let _ = ret.send(future);
                     }
                     IpfsEvent::GetBootstrappers(ret) => {
-                        let list = self.swarm.behaviour_mut().inner.get_bootstrappers();
+                        let list = self.swarm.behaviour_mut().get_bootstrappers();
                         let _ = ret.send(list);
                     }
                     IpfsEvent::AddBootstrapper(addr, ret) => {
-                        let result = self.swarm.behaviour_mut().inner.add_bootstrapper(addr);
+                        let result = self.swarm.behaviour_mut().add_bootstrapper(addr);
                         let _ = ret.send(result);
                     }
                     IpfsEvent::RemoveBootstrapper(addr, ret) => {
-                        let result = self.swarm.behaviour_mut().inner.remove_bootstrapper(addr);
+                        let result = self.swarm.behaviour_mut().remove_bootstrapper(addr);
                         let _ = ret.send(result);
                     }
                     IpfsEvent::ClearBootstrappers(ret) => {
-                        let list = self.swarm.behaviour_mut().inner.clear_bootstrappers();
+                        let list = self.swarm.behaviour_mut().clear_bootstrappers();
                         let _ = ret.send(list);
                     }
                     IpfsEvent::RestoreBootstrappers(ret) => {
-                        let list = self.swarm.behaviour_mut().inner.restore_bootstrappers();
+                        let list = self.swarm.behaviour_mut().restore_bootstrappers();
                         let _ = ret.send(list);
                     }
                     IpfsEvent::Exit => {
@@ -1649,11 +1649,11 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
             // wants this to be written with a `while let`.
             while let Poll::Ready(Some(evt)) = Pin::new(&mut self.repo_events).poll_next(ctx) {
                 match evt {
-                    RepoEvent::WantBlock(cid) => self.swarm.behaviour_mut().inner.want_block(cid),
+                    RepoEvent::WantBlock(cid) => self.swarm.behaviour_mut().want_block(cid),
                     RepoEvent::UnwantBlock(cid) => self
                         .swarm
                         .behaviour_mut()
-                        .inner
+                        
                         .bitswap()
                         .cancel_block(&cid),
                     RepoEvent::NewBlock(cid, ret) => {
@@ -1661,19 +1661,19 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         // associated Block ourselves
                         self.swarm
                             .behaviour_mut()
-                            .inner
+                            
                             .bitswap()
                             .cancel_block(&cid);
                         // currently disabled; see https://github.com/rs-ipfs/rust-ipfs/pull/281#discussion_r465583345
                         // for details regarding the concerns about enabling this functionality as-is
                         if false {
-                            let _ = ret.send(self.swarm.behaviour_mut().inner.start_providing(cid));
+                            let _ = ret.send(self.swarm.behaviour_mut().start_providing(cid));
                         } else {
                             let _ = ret.send(Err(anyhow!("not actively providing blocks yet")));
                         }
                     }
                     RepoEvent::RemovedBlock(cid) => {
-                        self.swarm.behaviour_mut().inner.stop_providing_block(&cid)
+                        self.swarm.behaviour_mut().stop_providing_block(&cid)
                     }
                 }
             }
