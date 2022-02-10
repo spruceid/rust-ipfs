@@ -4,9 +4,10 @@ use crate::config::BOOTSTRAP_NODES;
 use crate::p2p::{MultiaddrWithPeerId, SwarmOptions};
 use crate::repo::{BlockPut, Repo};
 use crate::subscription::{SubscriptionFuture, SubscriptionRegistry};
-use crate::{IpfsTypes, Ipfs};
+use crate::{IpfsTypes, IpfsEvent};
 use anyhow::anyhow;
 use cid::Cid;
+use futures::channel::mpsc::Sender;
 use ipfs_bitswap::{Bitswap, BitswapEvent};
 use libp2p::NetworkBehaviour;
 use libp2p::core::{Multiaddr, PeerId};
@@ -33,8 +34,8 @@ impl NetworkBehaviourEventProcess<void::Void> for NoopBehaviour {
 pub trait CustomBehaviourBuilder<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     /// Build method for your NetworkBehaviour implementation if your behaviour needs access to IPFS at runtime.
     /// 
-    /// The IPFS object will be uninitialised until started with ExtendedUninitialisedIpfs::start
-    fn build(self, ipfs: Ipfs<Types>) -> Custom;
+    /// Building a NetworkBehaviour implementation with this function will give it access to push events onto the IPFS event channel.
+    fn build(self, ipfs_event_sink: Sender<IpfsEvent>) -> Custom;
 }
 
 /// Behaviour type.
