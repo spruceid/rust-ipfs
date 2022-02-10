@@ -18,16 +18,15 @@ use libp2p::relay::Relay;
 // use libp2p::mdns::{MdnsEvent, TokioMdns};
 use libp2p::ping::{Ping, PingEvent};
 // use libp2p::swarm::toggle::Toggle;
-use libp2p::floodsub::FloodsubEvent;
 use libp2p::swarm::{DummyBehaviour, NetworkBehaviour, NetworkBehaviourEventProcess};
 use std::{convert::TryInto, sync::Arc};
 use tokio::task;
 
 /// A "do-nothing" behaviour.
-/// 
+///
 /// This is the default "custom" behaviour for Ipfs. This is replaced by supplying a custom
 /// behaviour to the [UninitializedIpfs](`crate::UninitializedIpfs`).
-#[derive(Clone, Default, NetworkBehaviour)]
+#[derive(Clone, Default, libp2p::NetworkBehaviour)]
 pub struct NoopBehaviour {
     inner: DummyBehaviour,
 }

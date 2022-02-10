@@ -47,7 +47,6 @@ use futures::{
     stream::{Fuse, Stream},
 };
 use libp2p::swarm::NetworkBehaviour;
-use p2p::{CustomBehaviourBuilder, TCustomSwarm};
 use tracing::Span;
 use tracing_futures::Instrument;
 
@@ -68,7 +67,7 @@ use self::{
     ipns::Ipns,
     p2p::{
         addr::{could_be_bound_from_ephemeral, starts_unspecified},
-        create_swarm, SwarmOptions,
+        create_swarm, CustomBehaviourBuilder, SwarmOptions, TCustomSwarm,
     },
     repo::{create_repo, Repo, RepoEvent, RepoOptions},
     subscription::SubscriptionFuture,
@@ -311,7 +310,7 @@ pub enum IpfsEvent {
 }
 
 /// The general representation of the builder for Ipfs<Types>.
-/// 
+///
 /// For the default representation without any custom NetworkBehaviours, see [UninitializedIpfs](`crate::UninitializedIpfs`).
 pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
     behaviour: p2p::Behaviour<Types, Custom>,
@@ -356,7 +355,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
     UninitializedExtendedIpfs<Types, Behaviour>
 {
     /// Set a custom [NetworkBehaviour](`libp2p::swarm::NetworkBehaviour`) for the Ipfs swarm.
-    /// 
+    ///
     /// Custom behaviours must have an [OutEvent](`libp2p::swarm::NetworkBehaviour::OutEvent`)
     /// of `()`.
     pub fn with_extended_behaviour<Custom: NetworkBehaviour<OutEvent = ()>>(
@@ -375,7 +374,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
 
     /// Set a custom [NetworkBehaviour](`libp2p::swarm::NetworkBehaviour`) for the Ipfs swarm from
     /// a [CustomBehaviourBuilder](`crate::p2p::CustomBehaviourBuilder`).
-    /// 
+    ///
     /// Custom behaviours must have an [OutEvent](`libp2p::swarm::NetworkBehaviour::OutEvent`)
     /// of `()`.
     pub fn with_extended_behaviour_from_builder<Custom, CustomBuilder>(
@@ -424,15 +423,15 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         // the "current" span which is not entered but the awaited futures are instrumented with it
         let init_span = tracing::trace_span!(parent: &root_span, "init");
 
+        // stored in the Ipfs, instrumenting every method call
+        let facade_span = tracing::trace_span!("facade");
+
         // stored in the executor given to libp2p, used to spawn at least the connections,
         // instrumenting each of those.
         let exec_span = tracing::trace_span!(parent: &root_span, "exec");
 
         // instruments the IpfsFuture, the background task.
         let swarm_span = tracing::trace_span!(parent: &root_span, "swarm");
-
-        // stored in the Ipfs, instrumenting every method call
-        let facade_span = tracing::trace_span!("facade");
 
         repo.init().instrument(init_span.clone()).await?;
 
@@ -446,8 +445,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         // FIXME: mutating options above is an unfortunate side-effect of this call, which could be
         // reordered for less error prone code.
         let swarm_options = SwarmOptions::from(&options);
-        let swarm =
-            init_span.in_scope(|| create_swarm(swarm_options, exec_span, behaviour))?;
+        let swarm = init_span.in_scope(|| create_swarm(swarm_options, exec_span, behaviour))?;
 
         let IpfsOptions {
             listening_addrs, ..
@@ -1464,8 +1462,7 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
 
                 match inner {
                     IpfsEvent::Connect(target, ret) => {
-                        ret.send(self.swarm.behaviour_mut().connect(target))
-                            .ok();
+                        ret.send(self.swarm.behaviour_mut().connect(target)).ok();
                     }
                     IpfsEvent::Addresses(ret) => {
                         let addrs = self.swarm.behaviour_mut().addrs();
@@ -1480,9 +1477,7 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         ret.send(Ok(connections.collect())).ok();
                     }
                     IpfsEvent::Disconnect(addr, ret) => {
-                        if let Some(disconnector) =
-                            self.swarm.behaviour_mut().disconnect(addr)
-                        {
+                        if let Some(disconnector) = self.swarm.behaviour_mut().disconnect(addr) {
                             disconnector.disconnect(&mut self.swarm);
                         }
                         ret.send(Ok(())).ok();
@@ -1497,48 +1492,30 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let _ = ret.send(addresses);
                     }
                     IpfsEvent::PubsubSubscribe(topic, ret) => {
-                        let _ =
-                            ret.send(self.swarm.behaviour_mut().pubsub().subscribe(topic));
+                        let _ = ret.send(self.swarm.behaviour_mut().pubsub().subscribe(topic));
                     }
                     IpfsEvent::PubsubUnsubscribe(topic, ret) => {
-                        let _ =
-                            ret.send(self.swarm.behaviour_mut().pubsub().unsubscribe(topic));
+                        let _ = ret.send(self.swarm.behaviour_mut().pubsub().unsubscribe(topic));
                     }
                     IpfsEvent::PubsubPublish(topic, data, ret) => {
-                        self.swarm
-                            .behaviour_mut()
-                            
-                            .pubsub()
-                            .publish(topic, data);
+                        self.swarm.behaviour_mut().pubsub().publish(topic, data);
                         let _ = ret.send(());
                     }
                     IpfsEvent::PubsubPeers(Some(topic), ret) => {
                         let topic = libp2p::floodsub::Topic::new(topic);
-                        let _ = ret.send(
-                            self.swarm
-                                .behaviour_mut()
-                                
-                                .pubsub()
-                                .subscribed_peers(&topic),
-                        );
+                        let _ =
+                            ret.send(self.swarm.behaviour_mut().pubsub().subscribed_peers(&topic));
                     }
                     IpfsEvent::PubsubPeers(None, ret) => {
                         let _ = ret.send(self.swarm.behaviour_mut().pubsub().known_peers());
                     }
                     IpfsEvent::PubsubSubscribed(ret) => {
-                        let _ = ret.send(
-                            self.swarm
-                                .behaviour_mut()
-                                
-                                .pubsub()
-                                .subscribed_topics(),
-                        );
+                        let _ = ret.send(self.swarm.behaviour_mut().pubsub().subscribed_topics());
                     }
                     IpfsEvent::WantList(peer, ret) => {
                         let list = if let Some(peer) = peer {
                             self.swarm
                                 .behaviour_mut()
-                                
                                 .bitswap()
                                 .peer_wantlist(&peer)
                                 .unwrap_or_default()
@@ -1588,7 +1565,6 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let peers = self
                             .swarm
                             .behaviour_mut()
-                            
                             .bitswap()
                             .connected_peers
                             .keys()
@@ -1597,27 +1573,19 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                         let _ = ret.send(peers);
                     }
                     IpfsEvent::FindPeer(peer_id, local_only, ret) => {
-                        let swarm_addrs = self
-                            .swarm
-                            .behaviour_mut()
-                            
-                            .swarm
-                            .connections_to(&peer_id);
+                        let swarm_addrs = self.swarm.behaviour_mut().swarm.connections_to(&peer_id);
                         let locally_known_addrs = if !swarm_addrs.is_empty() {
                             swarm_addrs
                         } else {
                             self.swarm
                                 .behaviour_mut()
-                                
                                 .kademlia()
                                 .addresses_of_peer(&peer_id)
                         };
                         let addrs = if !locally_known_addrs.is_empty() || local_only {
                             Either::Left(locally_known_addrs)
                         } else {
-                            Either::Right(
-                                self.swarm.behaviour_mut().get_closest_peers(peer_id),
-                            )
+                            Either::Right(self.swarm.behaviour_mut().get_closest_peers(peer_id))
                         };
                         let _ = ret.send(addrs);
                     }
@@ -1668,20 +1636,13 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
             while let Poll::Ready(Some(evt)) = Pin::new(&mut self.repo_events).poll_next(ctx) {
                 match evt {
                     RepoEvent::WantBlock(cid) => self.swarm.behaviour_mut().want_block(cid),
-                    RepoEvent::UnwantBlock(cid) => self
-                        .swarm
-                        .behaviour_mut()
-                        
-                        .bitswap()
-                        .cancel_block(&cid),
+                    RepoEvent::UnwantBlock(cid) => {
+                        self.swarm.behaviour_mut().bitswap().cancel_block(&cid)
+                    }
                     RepoEvent::NewBlock(cid, ret) => {
                         // TODO: consider if cancel is applicable in cases where we provide the
                         // associated Block ourselves
-                        self.swarm
-                            .behaviour_mut()
-                            
-                            .bitswap()
-                            .cancel_block(&cid);
+                        self.swarm.behaviour_mut().bitswap().cancel_block(&cid);
                         // currently disabled; see https://github.com/rs-ipfs/rust-ipfs/pull/281#discussion_r465583345
                         // for details regarding the concerns about enabling this functionality as-is
                         if false {
