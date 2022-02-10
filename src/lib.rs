@@ -306,6 +306,15 @@ enum IpfsEvent {
     Exit,
 }
 
+pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
+    behaviour: p2p::Behaviour<Types, Custom>,
+    ipfs_event_channel: (Sender<IpfsEvent>, Receiver<IpfsEvent>),
+    keys: Keypair,
+    options: IpfsOptions,
+    repo: Arc<Repo<Types>>,
+    repo_events: Receiver<RepoEvent>,
+}
+
 pub type UninitializedIpfs<Types> = UninitializedExtendedIpfs<Types, p2p::NoopBehaviour>;
 
 impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
@@ -322,36 +331,17 @@ impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
         let arc_repo = Arc::new(repo);
         let swarm_options = SwarmOptions::from(&options);
 
-        let (to_task, receiver) = channel::<IpfsEvent>(1);
-
-        // stored in the Ipfs, instrumenting every method call
-        let facade_span = tracing::trace_span!("facade");
-
-        let ipfs = Ipfs {
-            span: facade_span,
-            repo: arc_repo.clone(),
-            keys: DebuggableKeypair(keys),
-            to_task,
-        };
+        let channel = channel::<IpfsEvent>(1);
 
         Self {
-            repo: arc_repo.clone(),
-            ipfs,
-            receiver,
-            repo_events,
             behaviour: p2p::Behaviour::new(swarm_options, arc_repo),
+            ipfs_event_channel: channel,
+            keys,
             options: options,
+            repo: arc_repo.clone(),
+            repo_events,
         }
     }
-}
-
-pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
-    repo: Arc<Repo<Types>>,
-    ipfs: Ipfs<Types>,
-    receiver: Receiver<IpfsEvent>,
-    repo_events: Receiver<RepoEvent>,
-    behaviour: p2p::Behaviour<Types, Custom>,
-    options: IpfsOptions,
 }
 
 impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
@@ -362,12 +352,12 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         behaviour: Custom,
     ) -> UninitializedExtendedIpfs<Types, Custom> {
         UninitializedExtendedIpfs {
-            repo: self.repo,
-            ipfs: self.ipfs,
-            receiver: self.receiver,
-            repo_events: self.repo_events,
-            options: self.options,
             behaviour: self.behaviour.new_custom_behaviour(behaviour),
+            ipfs_event_channel: self.ipfs_event_channel,
+            keys: self.keys,
+            options: self.options,
+            repo: self.repo,
+            repo_events: self.repo_events,
         }
     }
 
@@ -379,14 +369,14 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         Custom: NetworkBehaviour<OutEvent = ()>,
         CustomBuilder: CustomBehaviourBuilder<Types, Custom>,
     {
-        let custom = behaviour_builder.build(self.ipfs.clone());
+        let custom = behaviour_builder.build(self.ipfs_event_channel.0.clone());
         UninitializedExtendedIpfs {
-            repo: self.repo,
-            ipfs: self.ipfs,
-            receiver: self.receiver,
-            repo_events: self.repo_events,
-            options: self.options,
             behaviour: self.behaviour.new_custom_behaviour(custom),
+            ipfs_event_channel: self.ipfs_event_channel,
+            keys: self.keys,
+            options: self.options,
+            repo: self.repo,
+            repo_events: self.repo_events,
         }
     }
     /// Initialize the ipfs node. The returned `Ipfs` value is cloneable, send and sync, and the
@@ -399,12 +389,12 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         use futures::stream::StreamExt;
 
         let Self {
+            behaviour,
+            ipfs_event_channel,
+            keys,
+            mut options,
             repo,
             repo_events,
-            mut options,
-            ipfs,
-            receiver,
-            behaviour,
         } = self;
 
         let root_span = options
@@ -423,7 +413,17 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         // instruments the IpfsFuture, the background task.
         let swarm_span = tracing::trace_span!(parent: &root_span, "swarm");
 
+        // stored in the Ipfs, instrumenting every method call
+        let facade_span = tracing::trace_span!("facade");
+
         repo.init().instrument(init_span.clone()).await?;
+
+        let ipfs = Ipfs {
+            span: facade_span,
+            repo,
+            keys: DebuggableKeypair(keys),
+            to_task: ipfs_event_channel.0,
+        };
 
         // FIXME: mutating options above is an unfortunate side-effect of this call, which could be
         // reordered for less error prone code.
@@ -437,7 +437,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
 
         let mut fut: IpfsFuture<Types, Behaviour> = IpfsFuture {
             repo_events: repo_events.fuse(),
-            from_facade: receiver.fuse(),
+            from_facade: ipfs_event_channel.1.fuse(),
             swarm,
             listening_addresses: HashMap::with_capacity(listening_addrs.len()),
         };
