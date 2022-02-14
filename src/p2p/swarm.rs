@@ -414,7 +414,7 @@ fn connection_point_addr(cp: &ConnectedPoint) -> MultiaddrWithoutPeerId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::transport::build_transport;
+    use crate::p2p::transport::TransportBuilder;
     use futures::{
         stream::{StreamExt, TryStreamExt},
         TryFutureExt,
@@ -582,7 +582,7 @@ mod tests {
     fn build_swarm() -> (PeerId, libp2p::swarm::Swarm<SwarmApi>) {
         let key = Keypair::generate_ed25519();
         let peer_id = key.public().into_peer_id();
-        let (transport, _) = build_transport(key).unwrap();
+        let transport = TransportBuilder::new(key).unwrap().build_transport();
 
         let swarm = SwarmBuilder::new(transport, SwarmApi::default(), peer_id)
             .executor(Box::new(ThreadLocalTokio))
