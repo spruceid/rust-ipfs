@@ -306,15 +306,12 @@ enum IpfsEvent {
     Exit,
 }
 
-type TSwarmEvent<Types> = <TSwarm<Types> as Stream>::Item;
-
 /// Configured Ipfs which can only be started.
 pub struct UninitializedIpfs<Types: IpfsTypes> {
     repo: Arc<Repo<Types>>,
     keys: Keypair,
     options: IpfsOptions,
     repo_events: Receiver<RepoEvent>,
-    swarm_event_handler: Option<Arc<dyn Fn(&mut TSwarm<Types>, &TSwarmEvent<Types>) + Sync + Send>>,
 }
 
 impl<Types: IpfsTypes> UninitializedIpfs<Types> {
@@ -334,36 +331,7 @@ impl<Types: IpfsTypes> UninitializedIpfs<Types> {
             keys,
             options,
             repo_events,
-            swarm_event_handler: None,
         }
-    }
-
-    /// Inject a handler for libp2p swarm events.
-    ///
-    /// You can provide a closure to handle libp2p events.
-    /// ```
-    /// # use ipfs::{IpfsOptions, UninitializedIpfs, TestTypes as Types};
-    /// # let opts = IpfsOptions::inmemory_with_generated_keys();
-    /// use ipfs::p2p::TSwarm;
-    /// use libp2p::swarm::SwarmEvent;
-    /// let uninit_ipfs: UninitializedIpfs<Types> = UninitializedIpfs::new(opts)
-    ///     .handle_swarm_events(|swarm:  &mut TSwarm<Types>, event: &SwarmEvent<_, _>| {
-    ///         if let SwarmEvent::ConnectionClosed {
-    ///             peer_id,
-    ///             endpoint,
-    ///             num_established,
-    ///             cause
-    ///         } = event {
-    ///             swarm.ban_peer_id(peer_id.clone())
-    ///         }
-    ///     });
-    /// ```
-    pub fn handle_swarm_events<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&mut TSwarm<Types>, &TSwarmEvent<Types>) + Sync + Send + 'static,
-    {
-        self.swarm_event_handler = Some(Arc::new(f));
-        self
     }
 
     /// Initialize the ipfs node. The returned `Ipfs` value is cloneable, send and sync, and the
@@ -380,7 +348,6 @@ impl<Types: IpfsTypes> UninitializedIpfs<Types> {
             keys,
             repo_events,
             mut options,
-            swarm_event_handler,
         } = self;
 
         let root_span = options
@@ -429,7 +396,6 @@ impl<Types: IpfsTypes> UninitializedIpfs<Types> {
             from_facade: receiver.fuse(),
             swarm,
             listening_addresses: HashMap::with_capacity(listening_addrs.len()),
-            swarm_event_handler,
         };
 
         for addr in listening_addrs.into_iter() {
@@ -1262,7 +1228,6 @@ struct IpfsFuture<Types: IpfsTypes> {
     repo_events: Fuse<Receiver<RepoEvent>>,
     from_facade: Fuse<Receiver<IpfsEvent>>,
     listening_addresses: HashMap<Multiaddr, (ListenerId, Option<Channel<Multiaddr>>)>,
-    swarm_event_handler: Option<Arc<dyn Fn(&mut TSwarm<Types>, &TSwarmEvent<Types>) + Sync + Send>>,
 }
 
 impl<TRepoTypes: RepoTypes> IpfsFuture<TRepoTypes> {
@@ -1412,9 +1377,6 @@ impl<TRepoTypes: RepoTypes> Future for IpfsFuture<TRepoTypes> {
                 // exhaust the swarm before possibly causing the swarm to do more work by popping
                 // off the events from Ipfs and ... this looping goes on for a while.
                 done = false;
-                if let Some(handler) = self.swarm_event_handler.clone() {
-                    handler(&mut self.swarm, &inner)
-                }
                 match inner {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         self.complete_listening_address_adding(address);
