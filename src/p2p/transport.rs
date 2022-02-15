@@ -21,6 +21,9 @@ use trust_dns_resolver::name_server::{GenericConnection, GenericConnectionProvid
 /// Transport type.
 pub(crate) type TTransport = Boxed<(PeerId, StreamMuxerBox)>;
 
+pub fn default_transport(keypair: identity::Keypair) -> io::Result<TTransport> {
+    TransportBuilder::new(keypair).map(TransportBuilder::build_transport)
+}
 pub struct TransportBuilder<T: Transport> {
     keypair: identity::Keypair,
     transport: T,

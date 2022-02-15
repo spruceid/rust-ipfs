@@ -4,7 +4,6 @@ use libp2p::identity::Keypair;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::Swarm;
 use libp2p::{Multiaddr, PeerId};
-use std::io;
 use tracing::Span;
 
 pub(crate) mod addr;
@@ -14,6 +13,8 @@ mod swarm;
 pub mod transport;
 
 pub use addr::{MultiaddrWithPeerId, MultiaddrWithoutPeerId};
+
+use self::transport::TTransport;
 
 pub use {
     behaviour::{Behaviour, CustomBehaviourBuilder, KadResult, NoopBehaviour},
@@ -63,21 +64,14 @@ pub fn create_swarm<TIpfsTypes: IpfsTypes, Custom: NetworkBehaviour<OutEvent = (
     options: SwarmOptions,
     span: Span,
     behaviour: Behaviour<TIpfsTypes, Custom>,
-) -> io::Result<TCustomSwarm<TIpfsTypes, Custom>> {
+    transport: TTransport,
+) -> TCustomSwarm<TIpfsTypes, Custom> {
     let peer_id = options.peer_id;
 
-    // Set up an encrypted TCP transport over the Mplex protocol.
-    let transport = transport::TransportBuilder::new(options.keypair.clone())?.build_transport();
-    //let upgrader = transport::TransportBuilder::new(options.keypair.clone())?.then();
-    //use crate::apply_upgrades;
-    //let transport = apply_upgrades!(upgrader =>);
-
     // Create a Swarm
-    let swarm = libp2p::swarm::SwarmBuilder::new(transport, behaviour, peer_id)
+    libp2p::swarm::SwarmBuilder::new(transport, behaviour, peer_id)
         .executor(Box::new(SpannedExecutor(span)))
-        .build();
-
-    Ok(swarm)
+        .build()
 }
 
 struct SpannedExecutor(Span);

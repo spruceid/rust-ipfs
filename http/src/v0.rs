@@ -174,11 +174,15 @@ mod tests {
     async fn testing_routes(
     ) -> impl warp::Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         use super::routes;
-        use ipfs::{IpfsOptions, UninitializedIpfs};
+        use ipfs::IpfsOptions;
 
         let options = IpfsOptions::inmemory_with_generated_keys();
-        let (ipfs, _): (Ipfs<TestTypes>, _) =
-            UninitializedIpfs::new(options).start().await.unwrap();
+        let (ipfs, _): (Ipfs<TestTypes>, _) = options
+            .create_uninitialised_ipfs()
+            .unwrap()
+            .start()
+            .await
+            .unwrap();
 
         let (shutdown_tx, _) = tokio::sync::mpsc::channel::<()>(1);
 
