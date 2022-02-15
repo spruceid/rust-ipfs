@@ -1,13 +1,60 @@
+//! Construction of [Transports](`libp2p::Transport`) for IPFS.
+//!
+//! This module is only needed if you need to extend the functionality of the underlying
+//! [Transport](`libp2p::Transport`).
+//!
+//! The base IPFS transport can be extended using [`TransportBuilder::or`] to wrap the base
+//! transport implementation inside another (see [`OrTransport`]):
+//!
+//! ```
+//! use ipfs::p2p::transport::{TTransport, TransportBuilder};
+//! use libp2p::core::transport::MemoryTransport;
+//! use libp2p::identity::Keypair;
+//! let keypair: Keypair = Keypair::generate_ed25519();
+//! let transport: TTransport = TransportBuilder::new(keypair).unwrap()
+//!     .or(MemoryTransport::default())
+//!     .build();
+//! ```
+//!
+//! To perform additional [Upgrades](`Upgrade`) on the connection, first apply any Transport
+//! extensions, use [`TransportBuilder::then`] to convert this builder into a [`TransportUpgrader`]
+//! , and then [apply](`TransportUpgrader::apply`) upgrades:
+//!
+//! ```
+//! use ipfs::p2p::transport::{TTransport, TransportBuilder};
+//! use libp2p::core::upgrade;
+//! use libp2p::identity::Keypair;
+//! use std::io;
+//! let keypair: Keypair = Keypair::generate_ed25519();
+//! let upgrade = upgrade::from_fn("/foo/1", move |mut sock: upgrade::Negotiated<_>, endpoint| async move {
+//!     if endpoint.is_dialer() {
+//!         upgrade::write_length_prefixed(&mut sock, "some handshake data").await?;
+//!         # use futures::AsyncWriteExt;
+//!         sock.close().await?;
+//!     } else {
+//!         let handshake_data = upgrade::read_length_prefixed(&mut sock, 1024).await?;
+//!         if handshake_data != b"some handshake data" {
+//!             return Err(io::Error::new(io::ErrorKind::Other, "bad handshake"));
+//!         }
+//!     }
+//!     Ok(sock)
+//! });
+//! let transport: TTransport = TransportBuilder::new(keypair).unwrap()
+//!     .then()
+//!     .apply(upgrade)
+//!     .build();
+//! ```
 use futures::{AsyncRead, AsyncWrite, Future};
 use libp2p::core::muxing::StreamMuxerBox;
-use libp2p::core::transport::upgrade::{Builder, Version};
-use libp2p::core::transport::{Boxed, OrTransport};
+use libp2p::core::transport::and_then::AndThen;
+use libp2p::core::transport::upgrade::{Authenticate, Authenticated, Version};
+use libp2p::core::transport::{Boxed, OrTransport, Upgrade};
 use libp2p::core::upgrade::SelectUpgrade;
-use libp2p::core::{Negotiated, UpgradeInfo};
+use libp2p::core::{ConnectedPoint, Negotiated};
 use libp2p::dns::{GenDnsConfig, TokioDnsConfig};
 use libp2p::mplex::MplexConfig;
-use libp2p::noise::{self, NoiseAuthenticated, NoiseConfig, NoiseOutput, X25519Spec, XX};
-use libp2p::relay::{Relay, RelayTransport};
+use libp2p::noise::{self, NoiseAuthenticated, NoiseConfig, X25519Spec, XX};
+use libp2p::relay::v1::{Relay, RelayTransport};
 use libp2p::tcp::tokio::Tcp;
 use libp2p::tcp::{GenTcpConfig, TokioTcpConfig};
 use libp2p::yamux::YamuxConfig;
@@ -19,12 +66,19 @@ use std::time::Duration;
 use trust_dns_resolver::name_server::{GenericConnection, GenericConnectionProvider, TokioRuntime};
 
 /// Transport type.
-pub(crate) type TTransport = Boxed<(PeerId, StreamMuxerBox)>;
+pub type TTransport = Boxed<(PeerId, StreamMuxerBox)>;
 
 pub fn default_transport(keypair: identity::Keypair) -> io::Result<TTransport> {
-    TransportBuilder::new(keypair).map(TransportBuilder::build_transport)
+    TransportBuilder::new(keypair).map(TransportBuilder::build)
 }
-pub struct TransportBuilder<T: Transport> {
+
+/// Builder for IPFS Transports.
+///
+/// This type can be used to build IPFS compatible Transport implementations. If you do not need to
+/// extend the base IPFS transport implementation, then you do not need to use this builder and can
+/// instead construct your [UninitializedIpfs](`crate::UninitializedIpfs`) directly from
+/// [IpfsOptions](`crate::IpfsOptions`).
+pub struct TransportBuilder<T> {
     keypair: identity::Keypair,
     transport: T,
 }
@@ -42,9 +96,15 @@ impl
     }
 }
 
-impl<T: Transport> TransportBuilder<T>
+impl<T> TransportBuilder<T>
 where
-    <T as Transport>::Error: 'static,
+    T: Transport + Clone + Send + Sync + 'static,
+    T::Dial: Send,
+    T::Error: 'static,
+    T::Error: Send + Sync + 'static,
+    T::Listener: Send,
+    T::ListenerUpgrade: Send,
+    T::Output: AsyncWrite + AsyncRead + Unpin + Send + 'static,
 {
     pub fn or<O: Transport>(self, other: O) -> TransportBuilder<OrTransport<O, T>> {
         TransportBuilder {
@@ -52,9 +112,7 @@ where
             transport: other.or_transport(self.transport),
         }
     }
-}
 
-impl<T: Transport + Clone> TransportBuilder<T> {
     pub fn relay(self) -> (TransportBuilder<RelayTransport<T>>, Relay) {
         let (transport, relay) =
             libp2p::relay::new_transport_and_behaviour(Default::default(), self.transport);
@@ -66,26 +124,25 @@ impl<T: Transport + Clone> TransportBuilder<T> {
             relay,
         )
     }
-}
 
-impl<T: Transport + Clone + Send + Sync + 'static> TransportBuilder<T>
-where
-    <T as Transport>::Error: Send + Sync + 'static,
-    <T as Transport>::Output: AsyncWrite + AsyncRead + Unpin + Send + 'static,
-    <T as Transport>::Listener: Send,
-    <T as Transport>::ListenerUpgrade: Send,
-    <T as Transport>::Dial: Send,
-{
-    /// Builds the transport that serves as a common ground for all connections.
-    ///
-    /// Set up an encrypted TCP transport over the Mplex protocol.
-    pub fn build_transport(self) -> TTransport {
+    pub fn then(
+        self,
+    ) -> TransportUpgrader<
+        AndThen<
+            T,
+            impl Clone
+                + FnOnce(
+                    T::Output,
+                    ConnectedPoint,
+                )
+                    -> Authenticate<T::Output, NoiseAuthenticated<XX, X25519Spec, ()>>,
+        >,
+    > {
         let xx_keypair = noise::Keypair::<noise::X25519Spec>::new()
             .into_authentic(&self.keypair)
             .unwrap();
         let noise_config = NoiseConfig::xx(xx_keypair).into_authenticated();
         self.transport
->>>>>>> ce11eca (Make the ipfs transport extensible.)
             .upgrade(Version::V1)
             .authenticate(noise_config)
             .multiplex(SelectUpgrade::new(
@@ -144,66 +201,44 @@ where
     }
 }
 
-pub mod apply_upgrades {
-    use super::{
-        noise, Builder, NoiseAuthenticated, NoiseConfig, TransportBuilder, X25519Spec, XX,
-    };
+/// Upgrader for IPFS Transports.
+///
+/// Facilitates the application of [Upgrades](`Upgrade`) to the transport.
+pub struct TransportUpgrader<T> {
+    authenticated: Authenticated<T>,
+}
 
-    pub use std::{
-        io::{Error, ErrorKind},
-        time::Duration,
-    };
-
-    pub use libp2p::{
-        core::{
-            muxing::StreamMuxerBox,
-            upgrade::{SelectUpgrade, Version},
-        },
-        mplex::MplexConfig,
-        yamux::YamuxConfig,
-        Transport,
-    };
-
-    impl<T: Transport> TransportBuilder<T>
+impl<T, C> TransportUpgrader<T>
+where
+    T: Transport<Output = (PeerId, C)> + Clone + Send + Sync + 'static,
+    T::Dial: Send,
+    T::Error: Send + Sync + 'static,
+    T::Listener: Send,
+    T::ListenerUpgrade: Send,
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    pub fn apply<U, D, E, F>(self, u: U) -> TransportUpgrader<Upgrade<T, U>>
     where
-        <T as Transport>::Error: 'static,
+        U: InboundUpgrade<Negotiated<C>, Output = D, Error = E, Future = F>,
+        U: OutboundUpgrade<Negotiated<C>, Output = D, Error = E, Future = F>,
+        U: Clone,
+        D: AsyncRead + AsyncWrite + Unpin,
+        E: StdError + 'static,
+        F: Future,
     {
-        pub fn then(self) -> TransportUpgrader<T> {
-            let xx_keypair = noise::Keypair::<noise::X25519Spec>::new()
-                .into_authentic(&self.keypair)
-                .unwrap();
-            let noise_config = NoiseConfig::xx(xx_keypair).into_authenticated();
-            TransportUpgrader {
-                noise_config,
-                builder: self.transport.upgrade(Version::V1),
-            }
-        }
+        let authenticated = self.authenticated.apply(u);
+        TransportUpgrader { authenticated }
     }
 
-    pub struct TransportUpgrader<T: Transport> {
-        pub noise_config: NoiseAuthenticated<XX, X25519Spec, ()>,
-        pub builder: Builder<T>,
-    }
-
-    #[macro_export]
-    macro_rules! apply_upgrades {
-        ($upgrader:expr => $($upgrades:expr),*) => {
-            {
-                use $crate::p2p::transport::apply_upgrades::*;
-                $upgrader.builder
-                    .authenticate($upgrader.noise_config)
-                    $(
-                        .apply($upgrades)
-                    )*
-                    .multiplex(SelectUpgrade::new(
-                        YamuxConfig::default(),
-                        MplexConfig::new(),
-                    ))
-                    .timeout(Duration::from_secs(20))
-                    .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)))
-                    .map_err(|err| Error::new(ErrorKind::Other, err))
-                    .boxed()
-            }
-        };
+    pub fn build(self) -> TTransport {
+        self.authenticated
+            .multiplex(SelectUpgrade::new(
+                YamuxConfig::default(),
+                MplexConfig::new(),
+            ))
+            .timeout(Duration::from_secs(20))
+            .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)))
+            .map_err(|err| Error::new(ErrorKind::Other, err))
+            .boxed()
     }
 }
