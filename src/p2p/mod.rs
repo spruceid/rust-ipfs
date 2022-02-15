@@ -61,10 +61,7 @@ pub async fn create_swarm<TIpfsTypes: IpfsTypes>(
     let peer_id = options.peer_id;
 
     // Set up an encrypted TCP transport over the Mplex protocol.
-    let transport = transport::TransportBuilder::new(options.keypair.clone())?.build_transport();
-    //let upgrader = transport::TransportBuilder::new(options.keypair.clone())?.then();
-    //use crate::apply_upgrades;
-    //let transport = apply_upgrades!(upgrader =>);
+    let transport = transport::TransportBuilder::new(options.keypair.clone())?.build();
 
     // Create a Kademlia behaviour
     let behaviour = behaviour::build_behaviour(options, repo).await;
