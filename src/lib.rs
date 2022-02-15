@@ -46,7 +46,8 @@ use futures::{
     sink::SinkExt,
     stream::{Fuse, Stream},
 };
-use libp2p::swarm::NetworkBehaviour;
+use libp2p::{relay::Relay, swarm::NetworkBehaviour};
+use p2p::transport::{default_transport, TTransport};
 use tracing::Span;
 use tracing_futures::Instrument;
 
@@ -193,8 +194,11 @@ impl IpfsOptions {
         }
     }
 
-    pub fn create_uninitialised_ipfs<Types: IpfsTypes>(self) -> UninitializedIpfs<Types> {
-        UninitializedIpfs::new(self)
+    pub fn create_uninitialised_ipfs<Types: IpfsTypes>(
+        self,
+    ) -> std::io::Result<UninitializedIpfs<Types>> {
+        let transport = default_transport(self.keypair.clone())?;
+        Ok(UninitializedIpfs::new(self, transport, None))
     }
 }
 
@@ -319,6 +323,7 @@ pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<
     options: IpfsOptions,
     repo: Arc<Repo<Types>>,
     repo_events: Receiver<RepoEvent>,
+    transport: TTransport,
 }
 
 /// The default builder for Ipfs<Types> without any custom NetworkBehaviours.
@@ -331,7 +336,7 @@ impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
     /// The span is attached to all operations called on the later created `Ipfs` along with all
     /// operations done in the background task as well as tasks spawned by the underlying
     /// `libp2p::Swarm`.
-    pub fn new(options: IpfsOptions) -> Self {
+    pub fn new(options: IpfsOptions, transport: TTransport, relay: Option<Relay>) -> Self {
         let repo_options = RepoOptions::from(&options);
         let (repo, repo_events) = create_repo(repo_options);
         let keys = options.keypair.clone();
@@ -341,12 +346,13 @@ impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
         let channel = channel::<IpfsEvent>(1);
 
         Self {
-            behaviour: p2p::Behaviour::new(swarm_options, arc_repo.clone()),
+            behaviour: p2p::Behaviour::new(swarm_options, arc_repo.clone(), relay),
             ipfs_event_channel: channel,
             keys,
             options: options,
             repo: arc_repo,
             repo_events,
+            transport,
         }
     }
 }
@@ -369,6 +375,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
             options: self.options,
             repo: self.repo,
             repo_events: self.repo_events,
+            transport: self.transport,
         }
     }
 
@@ -393,6 +400,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
             options: self.options,
             repo: self.repo,
             repo_events: self.repo_events,
+            transport: self.transport,
         }
     }
 
@@ -412,6 +420,7 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
             mut options,
             repo,
             repo_events,
+            transport,
         } = self;
 
         let root_span = options
@@ -445,7 +454,8 @@ impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
         // FIXME: mutating options above is an unfortunate side-effect of this call, which could be
         // reordered for less error prone code.
         let swarm_options = SwarmOptions::from(&options);
-        let swarm = init_span.in_scope(|| create_swarm(swarm_options, exec_span, behaviour))?;
+        let swarm =
+            init_span.in_scope(|| create_swarm(swarm_options, exec_span, behaviour, transport));
 
         let IpfsOptions {
             listening_addrs, ..
@@ -1757,7 +1767,7 @@ mod node {
             // given span
 
             let (ipfs, fut): (Ipfs<TestTypes>, _) =
-                UninitializedIpfs::new(opts).start().await.unwrap();
+                opts.create_uninitialised_ipfs().unwrap().start().await.unwrap();
             let bg_task = tokio::task::spawn(fut);
             let addrs = ipfs.identity().await.unwrap().1;
 
