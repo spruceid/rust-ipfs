@@ -145,7 +145,8 @@ fn main() {
         };
 
         // TODO: handle errors more gracefully.
-        let (ipfs, task): (Ipfs<ipfs::Types>, _) = UninitializedIpfs::new(opts)
+        let (ipfs, task): (Ipfs<ipfs::Types>, _) = opts.create_uninitialised_ipfs()
+            .expect("Failed to initialize transport.")
             .start()
             .await
             .expect("Initialization failed");
