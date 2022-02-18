@@ -46,7 +46,7 @@ use futures::{
     sink::SinkExt,
     stream::{Fuse, Stream},
 };
-use libp2p::{relay::Relay, swarm::NetworkBehaviour};
+use libp2p::{relay::v1::Relay, swarm::NetworkBehaviour};
 use p2p::transport::{default_transport, TTransport};
 use tracing::Span;
 use tracing_futures::Instrument;
@@ -1766,8 +1766,12 @@ mod node {
             // for future: assume UninitializedIpfs handles instrumenting any futures with the
             // given span
 
-            let (ipfs, fut): (Ipfs<TestTypes>, _) =
-                opts.create_uninitialised_ipfs().unwrap().start().await.unwrap();
+            let (ipfs, fut): (Ipfs<TestTypes>, _) = opts
+                .create_uninitialised_ipfs()
+                .unwrap()
+                .start()
+                .await
+                .unwrap();
             let bg_task = tokio::task::spawn(fut);
             let addrs = ipfs.identity().await.unwrap().1;
 
