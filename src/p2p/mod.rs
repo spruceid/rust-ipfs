@@ -12,7 +12,7 @@ pub(crate) mod addr;
 mod behaviour;
 pub(crate) mod pubsub;
 mod swarm;
-mod transport;
+pub mod transport;
 
 pub use addr::{MultiaddrWithPeerId, MultiaddrWithoutPeerId};
 pub use {behaviour::KadResult, swarm::Connection};
@@ -61,7 +61,7 @@ pub async fn create_swarm<TIpfsTypes: IpfsTypes>(
     let peer_id = options.peer_id;
 
     // Set up an encrypted TCP transport over the Mplex protocol.
-    let transport = transport::build_transport(options.keypair.clone())?;
+    let transport = transport::TransportBuilder::new(options.keypair.clone())?.build();
 
     // Create a Kademlia behaviour
     let behaviour = behaviour::build_behaviour(options, repo).await;
