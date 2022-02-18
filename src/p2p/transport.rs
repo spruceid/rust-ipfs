@@ -336,3 +336,38 @@ where
         self.upgrade.upgrade_outbound(socket, info).and_then( self.fun )
     }
 }
+
+mod t {
+    use libp2p::{
+        core::{transport::MemoryTransport, upgrade},
+        noise::NoiseError,
+    };
+
+    use super::*;
+    fn _x() {
+        let upgrade = upgrade::from_fn(
+            "/foo/1",
+            move |mut sock: upgrade::Negotiated<_>, endpoint| async move {
+                if endpoint.is_dialer() {
+                    upgrade::write_length_prefixed(&mut sock, "some handshake data").await?;
+                    use futures::AsyncWriteExt;
+                    sock.close().await?;
+                } else {
+                    let handshake_data = upgrade::read_length_prefixed(&mut sock, 1024).await?;
+                    if handshake_data != b"some handshake data" {
+                        return Err(io::Error::new(io::ErrorKind::Other, "bad handshake"));
+                    }
+                }
+                Ok(sock)
+            },
+        );
+        TransportBuilder::new(identity::Keypair::generate_ed25519())
+            .unwrap()
+            .or(MemoryTransport::default())
+            .map_auth()
+            .map(|(a, _e)| async { Ok::<_, NoiseError>(a) })
+            .apply_upgrades()
+            .apply(upgrade)
+            .build();
+    }
+}
