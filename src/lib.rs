@@ -46,7 +46,8 @@ use futures::{
     sink::SinkExt,
     stream::{Fuse, Stream},
 };
-use libp2p::swarm::NetworkBehaviour;
+use libp2p::{relay::Relay, swarm::NetworkBehaviour};
+use p2p::transport::{default_transport, TTransport};
 use tracing::Span;
 use tracing_futures::Instrument;
 
@@ -67,7 +68,7 @@ use self::{
     ipns::Ipns,
     p2p::{
         addr::{could_be_bound_from_ephemeral, starts_unspecified},
-        create_swarm, SwarmOptions, TSwarm,
+        create_swarm, CustomBehaviourBuilder, SwarmOptions, TCustomSwarm,
     },
     repo::{create_repo, Repo, RepoEvent, RepoOptions},
     subscription::SubscriptionFuture,
@@ -192,6 +193,13 @@ impl IpfsOptions {
             span: None,
         }
     }
+
+    pub fn create_uninitialised_ipfs<Types: IpfsTypes>(
+        self,
+    ) -> std::io::Result<UninitializedIpfs<Types>> {
+        let transport = default_transport(self.keypair.clone())?;
+        Ok(UninitializedIpfs::new(self, transport, None))
+    }
 }
 
 /// Workaround for libp2p::identity::Keypair missing a Debug impl, works with references and owned
@@ -248,7 +256,7 @@ type Channel<T> = OneshotSender<Result<T, Error>>;
 /// Events used internally to communicate with the swarm, which is executed in the the background
 /// task.
 #[derive(Debug)]
-enum IpfsEvent {
+pub enum IpfsEvent {
     /// Connect
     Connect(
         MultiaddrWithPeerId,
@@ -306,81 +314,114 @@ enum IpfsEvent {
     Exit,
 }
 
-type TSwarmEvent<Types> = <TSwarm<Types> as Stream>::Item;
-
-/// Configured Ipfs which can only be started.
-pub struct UninitializedIpfs<Types: IpfsTypes> {
-    repo: Arc<Repo<Types>>,
+/// The general representation of the builder for Ipfs<Types>.
+///
+/// For the default representation without any custom NetworkBehaviours, see [UninitializedIpfs](`crate::UninitializedIpfs`).
+pub struct UninitializedExtendedIpfs<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> {
+    behaviour: p2p::Behaviour<Types, Custom>,
+    ipfs_event_channel: (Sender<IpfsEvent>, Receiver<IpfsEvent>),
     keys: Keypair,
     options: IpfsOptions,
+    repo: Arc<Repo<Types>>,
     repo_events: Receiver<RepoEvent>,
-    swarm_event_handler: Option<Arc<dyn Fn(&mut TSwarm<Types>, &TSwarmEvent<Types>) + Sync + Send>>,
+    transport: TTransport,
 }
 
-impl<Types: IpfsTypes> UninitializedIpfs<Types> {
+/// The default builder for Ipfs<Types> without any custom NetworkBehaviours.
+pub type UninitializedIpfs<Types> = UninitializedExtendedIpfs<Types, p2p::NoopBehaviour>;
+
+impl<Types: IpfsTypes> UninitializedExtendedIpfs<Types, p2p::NoopBehaviour> {
     /// Configures a new UninitializedIpfs with from the given options and optionally a span.
     /// If the span is not given, it is defaulted to `tracing::trace_span!("ipfs")`.
     ///
     /// The span is attached to all operations called on the later created `Ipfs` along with all
     /// operations done in the background task as well as tasks spawned by the underlying
     /// `libp2p::Swarm`.
-    pub fn new(options: IpfsOptions) -> Self {
+    pub fn new(options: IpfsOptions, transport: TTransport, relay: Option<Relay>) -> Self {
         let repo_options = RepoOptions::from(&options);
         let (repo, repo_events) = create_repo(repo_options);
         let keys = options.keypair.clone();
+        let arc_repo = Arc::new(repo);
+        let swarm_options = SwarmOptions::from(&options);
 
-        UninitializedIpfs {
-            repo: Arc::new(repo),
+        let channel = channel::<IpfsEvent>(1);
+
+        Self {
+            behaviour: p2p::Behaviour::new(swarm_options, arc_repo.clone(), relay),
+            ipfs_event_channel: channel,
             keys,
-            options,
+            options: options,
+            repo: arc_repo,
             repo_events,
-            swarm_event_handler: None,
+            transport,
+        }
+    }
+}
+
+impl<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
+    UninitializedExtendedIpfs<Types, Behaviour>
+{
+    /// Set a custom [NetworkBehaviour](`libp2p::swarm::NetworkBehaviour`) for the Ipfs swarm.
+    ///
+    /// Custom behaviours must have an [OutEvent](`libp2p::swarm::NetworkBehaviour::OutEvent`)
+    /// of `()`.
+    pub fn with_extended_behaviour<Custom: NetworkBehaviour<OutEvent = ()>>(
+        self,
+        behaviour: Custom,
+    ) -> UninitializedExtendedIpfs<Types, Custom> {
+        UninitializedExtendedIpfs {
+            behaviour: self.behaviour.new_custom_behaviour(behaviour),
+            ipfs_event_channel: self.ipfs_event_channel,
+            keys: self.keys,
+            options: self.options,
+            repo: self.repo,
+            repo_events: self.repo_events,
+            transport: self.transport,
         }
     }
 
-    /// Inject a handler for libp2p swarm events.
+    /// Set a custom [NetworkBehaviour](`libp2p::swarm::NetworkBehaviour`) for the Ipfs swarm from
+    /// a [CustomBehaviourBuilder](`crate::p2p::CustomBehaviourBuilder`).
     ///
-    /// You can provide a closure to handle libp2p events.
-    /// ```
-    /// # use ipfs::{IpfsOptions, UninitializedIpfs, TestTypes as Types};
-    /// # let opts = IpfsOptions::inmemory_with_generated_keys();
-    /// use ipfs::p2p::TSwarm;
-    /// use libp2p::swarm::SwarmEvent;
-    /// let uninit_ipfs: UninitializedIpfs<Types> = UninitializedIpfs::new(opts)
-    ///     .handle_swarm_events(|swarm:  &mut TSwarm<Types>, event: &SwarmEvent<_, _>| {
-    ///         if let SwarmEvent::ConnectionClosed {
-    ///             peer_id,
-    ///             endpoint,
-    ///             num_established,
-    ///             cause
-    ///         } = event {
-    ///             swarm.ban_peer_id(peer_id.clone())
-    ///         }
-    ///     });
-    /// ```
-    pub fn handle_swarm_events<F>(mut self, f: F) -> Self
+    /// Custom behaviours must have an [OutEvent](`libp2p::swarm::NetworkBehaviour::OutEvent`)
+    /// of `()`.
+    pub fn with_extended_behaviour_from_builder<Custom, CustomBuilder>(
+        self,
+        behaviour_builder: CustomBuilder,
+    ) -> UninitializedExtendedIpfs<Types, Custom>
     where
-        F: Fn(&mut TSwarm<Types>, &TSwarmEvent<Types>) + Sync + Send + 'static,
+        Custom: NetworkBehaviour<OutEvent = ()>,
+        CustomBuilder: CustomBehaviourBuilder<Types, Custom>,
     {
-        self.swarm_event_handler = Some(Arc::new(f));
-        self
+        let custom = behaviour_builder.build(self.ipfs_event_channel.0.clone());
+        UninitializedExtendedIpfs {
+            behaviour: self.behaviour.new_custom_behaviour(custom),
+            ipfs_event_channel: self.ipfs_event_channel,
+            keys: self.keys,
+            options: self.options,
+            repo: self.repo,
+            repo_events: self.repo_events,
+            transport: self.transport,
+        }
     }
 
     /// Initialize the ipfs node. The returned `Ipfs` value is cloneable, send and sync, and the
-    /// future should be spawned on a executor as soon as possible.
+    /// future should be spawned on an executor as soon as possible.
     ///
     /// The future returned from this method should not need
-    /// (instrumenting)[`tracing_futures::Instrument::instrument`] as the [`IpfsOptions::span`]
+    /// [instrumenting](`tracing_futures::Instrument::instrument`) as the [`IpfsOptions::span`]
     /// will be used as parent span for all of the awaited and created futures.
     pub async fn start(self) -> Result<(Ipfs<Types>, impl Future<Output = ()>), Error> {
         use futures::stream::StreamExt;
 
-        let UninitializedIpfs {
-            repo,
+        let Self {
+            behaviour,
+            ipfs_event_channel,
             keys,
-            repo_events,
             mut options,
-            swarm_event_handler,
+            repo,
+            repo_events,
+            transport,
         } = self;
 
         let root_span = options
@@ -404,32 +445,28 @@ impl<Types: IpfsTypes> UninitializedIpfs<Types> {
 
         repo.init().instrument(init_span.clone()).await?;
 
-        let (to_task, receiver) = channel::<IpfsEvent>(1);
-
         let ipfs = Ipfs {
             span: facade_span,
-            repo: repo.clone(),
+            repo,
             keys: DebuggableKeypair(keys),
-            to_task,
+            to_task: ipfs_event_channel.0,
         };
 
         // FIXME: mutating options above is an unfortunate side-effect of this call, which could be
         // reordered for less error prone code.
         let swarm_options = SwarmOptions::from(&options);
-        let swarm = create_swarm(swarm_options, exec_span, repo)
-            .instrument(tracing::trace_span!(parent: &init_span, "swarm"))
-            .await?;
+        let swarm =
+            init_span.in_scope(|| create_swarm(swarm_options, exec_span, behaviour, transport));
 
         let IpfsOptions {
             listening_addrs, ..
         } = options;
 
-        let mut fut = IpfsFuture {
+        let mut fut: IpfsFuture<Types, Behaviour> = IpfsFuture {
             repo_events: repo_events.fuse(),
-            from_facade: receiver.fuse(),
+            from_facade: ipfs_event_channel.1.fuse(),
             swarm,
             listening_addresses: HashMap::with_capacity(listening_addrs.len()),
-            swarm_event_handler,
         };
 
         for addr in listening_addrs.into_iter() {
@@ -1257,15 +1294,16 @@ impl<Types: IpfsTypes> Ipfs<Types> {
 
 /// Background task of `Ipfs` created when calling `UninitializedIpfs::start`.
 // The receivers are Fuse'd so that we don't have to manage state on them being exhausted.
-struct IpfsFuture<Types: IpfsTypes> {
-    swarm: TSwarm<Types>,
+struct IpfsFuture<Types: IpfsTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> {
+    swarm: TCustomSwarm<Types, Behaviour>,
     repo_events: Fuse<Receiver<RepoEvent>>,
     from_facade: Fuse<Receiver<IpfsEvent>>,
     listening_addresses: HashMap<Multiaddr, (ListenerId, Option<Channel<Multiaddr>>)>,
-    swarm_event_handler: Option<Arc<dyn Fn(&mut TSwarm<Types>, &TSwarmEvent<Types>) + Sync + Send>>,
 }
 
-impl<TRepoTypes: RepoTypes> IpfsFuture<TRepoTypes> {
+impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>>
+    IpfsFuture<TRepoTypes, Behaviour>
+{
     /// Completes the adding of listening address by matching the new listening address `addr` to
     /// the `self.listening_addresses` so that we can detect even the multiaddresses with ephemeral
     /// ports.
@@ -1385,7 +1423,9 @@ impl<TRepoTypes: RepoTypes> IpfsFuture<TRepoTypes> {
     }
 }
 
-impl<TRepoTypes: RepoTypes> Future for IpfsFuture<TRepoTypes> {
+impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
+    for IpfsFuture<TRepoTypes, Behaviour>
+{
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
@@ -1412,9 +1452,6 @@ impl<TRepoTypes: RepoTypes> Future for IpfsFuture<TRepoTypes> {
                 // exhaust the swarm before possibly causing the swarm to do more work by popping
                 // off the events from Ipfs and ... this looping goes on for a while.
                 done = false;
-                if let Some(handler) = self.swarm_event_handler.clone() {
-                    handler(&mut self.swarm, &inner)
-                }
                 match inner {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         self.complete_listening_address_adding(address);
@@ -1729,7 +1766,7 @@ mod node {
             // given span
 
             let (ipfs, fut): (Ipfs<TestTypes>, _) =
-                UninitializedIpfs::new(opts).start().await.unwrap();
+                opts.create_uninitialised_ipfs().unwrap().start().await.unwrap();
             let bg_task = tokio::task::spawn(fut);
             let addrs = ipfs.identity().await.unwrap().1;
 
