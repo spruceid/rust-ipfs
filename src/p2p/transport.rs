@@ -1,5 +1,5 @@
 //! Construction of [Transports](`libp2p::Transport`) for IPFS.
-//! 
+//!
 //! This module is only needed if you need to extend the functionality of the underlying
 //! [Transport](`libp2p::Transport`).
 //!
@@ -19,7 +19,7 @@
 //! To perform additional [Upgrades](`Upgrade`) on the connection, first apply any Transport
 //! extensions, use [`TransportBuilder::then`] to convert this builder into a [`TransportUpgrader`]
 //! , and then [apply](`TransportUpgrader::apply`) upgrades:
-//! 
+//!
 //! ```
 //! use ipfs::p2p::transport::{TTransport, TransportBuilder};
 //! use libp2p::core::upgrade;
@@ -44,13 +44,14 @@
 //!     .apply(upgrade)
 //!     .build();
 //! ```
+use futures::future::{AndThen as FutAndThen, ErrInto, MapOk};
 use futures::{AsyncRead, AsyncWrite, Future, TryFutureExt};
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::and_then::AndThen;
 use libp2p::core::transport::upgrade::{Authenticate, Authenticated, Version};
 use libp2p::core::transport::{Boxed, OrTransport, Upgrade};
 use libp2p::core::upgrade::SelectUpgrade;
-use libp2p::core::{ConnectedPoint, Negotiated, UpgradeInfo};
+use libp2p::core::{ConnectedPoint, Endpoint, Negotiated, UpgradeInfo};
 use libp2p::dns::{GenDnsConfig, TokioDnsConfig};
 use libp2p::mplex::MplexConfig;
 use libp2p::noise::{self, NoiseAuthenticated, NoiseConfig, X25519Spec, XX};
@@ -125,16 +126,20 @@ where
         )
     }
 
-    pub fn map_auth(self) -> TransportAuthMapper<T, NoiseAuthenticated<XX, X25519Spec, ()>>
-    {
+    pub fn map_auth(self) -> TransportAuthMapper<T, NoiseAuthenticated<XX, X25519Spec, ()>> {
         let xx_keypair = noise::Keypair::<noise::X25519Spec>::new()
             .into_authentic(&self.keypair)
             .unwrap();
         let noise_auth = NoiseConfig::xx(xx_keypair).into_authenticated();
-        TransportAuthMapper { transport: self.transport, auth: noise_auth }
+        TransportAuthMapper {
+            transport: self.transport,
+            auth: noise_auth,
+        }
     }
 
-    pub fn apply_upgrades(self) -> TransportUpgrader<
+    pub fn apply_upgrades(
+        self,
+    ) -> TransportUpgrader<
         AndThen<
             T,
             impl Clone
@@ -152,18 +157,17 @@ where
     ///
     /// Set up an encrypted TCP transport over the Mplex protocol.
     pub fn build(self) -> TTransport {
-        self.map_auth().apply_upgrades().build()
+        self.apply_upgrades().build()
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct TransportAuthMapper<T, A> 
-{
+pub struct TransportAuthMapper<T, A> {
     transport: T,
     auth: A,
 }
 
-impl<T, A, C, E, F> TransportAuthMapper<T, A> 
+impl<T, A, C, E, Fi, Fo> TransportAuthMapper<T, A>
 where
     T: Transport + Clone + Send + Sync + 'static,
     T::Dial: Send,
@@ -172,43 +176,39 @@ where
     T::ListenerUpgrade: Send,
     T::Output: AsyncWrite + AsyncRead + Unpin + Send + 'static,
     A: Clone + Send + Sync + 'static,
-    A: InboundUpgrade<Negotiated<T::Output>, Output = (PeerId, C), Error = E, Future = F>,
-    A: OutboundUpgrade<Negotiated<T::Output>, Output = (PeerId, C), Error = E, Future = F>,
+    A: InboundUpgrade<Negotiated<T::Output>, Output = (PeerId, C), Error = E, Future = Fi>,
+    A: OutboundUpgrade<Negotiated<T::Output>, Output = (PeerId, C), Error = E, Future = Fo>,
     <A as UpgradeInfo>::Info: Send,
     <<A as UpgradeInfo>::InfoIter as IntoIterator>::IntoIter: Send,
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: Send + Sync + StdError + 'static,
-    F: Send + 'static,
+    Fi: Send + 'static,
+    Fo: Send + 'static,
 {
-    pub fn map_inbound<Fun>(self, fun: Fun) -> TransportAuthMapper<T, TryMapInboundUpgrade<A, Fun>>
+    pub fn map<Fun, Fut, Err, D>(self, fun: Fun) -> TransportAuthMapper<T, TryMapUpgrade<A, Fun>>
     where
+        Fun: FnOnce(((PeerId, C), Endpoint)) -> Fut + Clone,
+        Fut: Future<Output = Result<(PeerId, D), Err>>,
+        Err: From<E>,
     {
-        let auth = TryMapInboundUpgrade{ upgrade: self.auth, fun };
-        TransportAuthMapper{transport: self.transport, auth }
-    } 
-
-    pub fn map_outbound<Fun>(self, fun: Fun) -> TransportAuthMapper<T, TryMapOutboundUpgrade<A, Fun>>
-    where
-    {
-        let auth = TryMapOutboundUpgrade{ upgrade: self.auth, fun };
-        TransportAuthMapper{transport: self.transport, auth }
-    } 
-
-    pub fn apply_upgrades(self) -> TransportUpgrader<
-        AndThen<
-            T,
-            impl Clone
-                + FnOnce(
-                    T::Output,
-                    ConnectedPoint,
-                )
-                    -> Authenticate<T::Output, A>,
-        >,
-    >
-    {
-        TransportUpgrader { authenticated: self.transport.upgrade(Version::V1).authenticate(self.auth) }
+        TransportAuthMapper {
+            transport: self.transport,
+            auth: TryMapUpgrade {
+                upgrade: self.auth,
+                fun,
+            },
+        }
     }
 
+    pub fn apply_upgrades(
+        self,
+    ) -> TransportUpgrader<
+        AndThen<T, impl Clone + FnOnce(T::Output, ConnectedPoint) -> Authenticate<T::Output, A>>,
+    > {
+        TransportUpgrader {
+            authenticated: self.transport.upgrade(Version::V1).authenticate(self.auth),
+        }
+    }
 
     /// Builds the transport that serves as a common ground for all connections.
     ///
@@ -219,7 +219,7 @@ where
 }
 
 /// Upgrader for IPFS Transports.
-/// 
+///
 /// Facilitates the application of [Upgrades](`Upgrade`) to the transport.
 #[derive(Clone)]
 pub struct TransportUpgrader<T> {
@@ -248,7 +248,6 @@ where
         TransportUpgrader { authenticated }
     }
 
-
     /// Builds the transport that serves as a common ground for all connections.
     ///
     /// Set up an encrypted TCP transport over the Mplex protocol.
@@ -265,16 +264,15 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct TryMapInboundUpgrade<U, F>
-{
+#[derive(Clone)]
+pub struct TryMapUpgrade<U, F> {
     upgrade: U,
     fun: F,
 }
 
-impl<U, F> UpgradeInfo for TryMapInboundUpgrade<U, F>
+impl<U, F> UpgradeInfo for TryMapUpgrade<U, F>
 where
-  U: UpgradeInfo
+    U: UpgradeInfo,
 {
     type Info = U::Info;
 
@@ -285,58 +283,48 @@ where
     }
 }
 
-impl<U, F, T, Fut, D> InboundUpgrade<T> for TryMapInboundUpgrade<U, F> 
+impl<U, F, X, Y, D, E, T> InboundUpgrade<T> for TryMapUpgrade<U, F>
 where
-    U: InboundUpgrade<T>,
-    F: FnOnce(U::Output) -> Fut,
-    Fut: Future<Output = Result<D, U::Error>>,
-  {
+    U: InboundUpgrade<T, Output = X>,
+    F: FnOnce((X, Endpoint)) -> Y,
+    Y: Future<Output = Result<D, E>>,
+    E: From<U::Error>,
+{
     type Output = D;
 
-    type Error = U::Error;
+    type Error = E;
 
-    type Future = futures::future::AndThen<U::Future, Fut, F>;
-
+    type Future = FutAndThen<MapOk<ErrInto<U::Future, E>, fn(X) -> (X, Endpoint)>, Y, F>;
 
     fn upgrade_inbound(self, socket: T, info: Self::Info) -> Self::Future {
-        self.upgrade.upgrade_inbound(socket, info).and_then( self.fun )
+        let with_endpoint: fn(X) -> (X, Endpoint) = |x| (x, Endpoint::Listener);
+        self.upgrade
+            .upgrade_inbound(socket, info)
+            .err_into()
+            .map_ok(with_endpoint)
+            .and_then(self.fun)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct TryMapOutboundUpgrade<U, F>
-{
-    upgrade: U,
-    fun: F,
-}
-
-impl<U, F> UpgradeInfo for TryMapOutboundUpgrade<U, F>
+impl<U, F, X, Y, D, E, T> OutboundUpgrade<T> for TryMapUpgrade<U, F>
 where
-  U: UpgradeInfo
+    U: OutboundUpgrade<T, Output = X>,
+    F: FnOnce((X, Endpoint)) -> Y,
+    Y: Future<Output = Result<D, E>>,
+    E: From<U::Error>,
 {
-    type Info = U::Info;
-
-    type InfoIter = U::InfoIter;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        self.upgrade.protocol_info()
-    }
-}
-
-impl<U, F, T, Fut, D> OutboundUpgrade<T> for TryMapOutboundUpgrade<U, F> 
-where
-    U: OutboundUpgrade<T>,
-    F: FnOnce(U::Output) -> Fut,
-    Fut: Future<Output = Result<D, U::Error>>,
-  {
     type Output = D;
 
-    type Error = U::Error;
+    type Error = E;
 
-    type Future = futures::future::AndThen<U::Future, Fut, F>;
-
+    type Future = FutAndThen<MapOk<ErrInto<U::Future, E>, fn(X) -> (X, Endpoint)>, Y, F>;
 
     fn upgrade_outbound(self, socket: T, info: Self::Info) -> Self::Future {
-        self.upgrade.upgrade_outbound(socket, info).and_then( self.fun )
+        let with_endpoint: fn(X) -> (X, Endpoint) = |x| (x, Endpoint::Dialer);
+        self.upgrade
+            .upgrade_outbound(socket, info)
+            .err_into()
+            .map_ok(with_endpoint)
+            .and_then(self.fun)
     }
 }
