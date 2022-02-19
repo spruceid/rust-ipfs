@@ -2,7 +2,7 @@ use std::num::NonZeroU16;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
-use ipfs::{Ipfs, IpfsOptions, IpfsTypes, UninitializedIpfs};
+use ipfs::{Ipfs, IpfsOptions, IpfsTypes};
 use ipfs::{Multiaddr, Protocol};
 use ipfs_http::{config, v0};
 
