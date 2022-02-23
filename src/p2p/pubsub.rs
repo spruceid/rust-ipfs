@@ -252,6 +252,14 @@ impl NetworkBehaviour for Pubsub {
         self.floodsub.addresses_of_peer(peer_id)
     }
 
+    fn inject_connected(&mut self, peer_id: &PeerId) {
+        self.floodsub.inject_connected(peer_id);
+    }
+
+    fn inject_disconnected(&mut self, peer_id: &PeerId) {
+        self.floodsub.inject_disconnected(peer_id)
+    }
+
     fn inject_connection_established(
         &mut self,
         peer_id: &PeerId,

@@ -406,7 +406,12 @@ mod tests {
 
     async fn tokio_ipfs() -> ipfs::Ipfs<ipfs::TestTypes> {
         let options = ipfs::IpfsOptions::inmemory_with_generated_keys();
-        let (ipfs, fut) = options.create_uninitialised_ipfs().unwrap().start().await.unwrap();
+        let (ipfs, fut) = options
+            .create_uninitialised_ipfs()
+            .unwrap()
+            .start()
+            .await
+            .unwrap();
 
         tokio::spawn(fut);
         ipfs

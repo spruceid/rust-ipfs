@@ -271,6 +271,7 @@ pub enum IpfsEvent {
     Disconnect(MultiaddrWithPeerId, Channel<()>),
     /// Request background task to return the listened and external addresses
     GetAddresses(OneshotSender<Vec<Multiaddr>>),
+    PubsubAddPeer(PeerId, OneshotSender<()>),
     PubsubSubscribe(String, OneshotSender<Option<SubscriptionStream>>),
     PubsubUnsubscribe(String, OneshotSender<bool>),
     PubsubPublish(String, Vec<u8>, OneshotSender<()>),
@@ -816,6 +817,21 @@ impl<Types: IpfsTypes> Ipfs<Types> {
             }
 
             Ok((public_key, addresses))
+        }
+        .instrument(self.span.clone())
+        .await
+    }
+
+    pub async fn pubsub_add_peer(&self, peer_id: PeerId) -> Result<(), Error> {
+        async move {
+            let (tx, rx) = oneshot_channel::<()>();
+
+            self.to_task
+                .clone()
+                .send(IpfsEvent::PubsubAddPeer(peer_id, tx))
+                .await?;
+
+            Ok(rx.await?)
         }
         .instrument(self.span.clone())
         .await
@@ -1500,6 +1516,14 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                             .extend(self.swarm.external_addresses().map(|ar| ar.addr.to_owned()));
                         // ignore error, perhaps caller went away already
                         let _ = ret.send(addresses);
+                    }
+                    IpfsEvent::PubsubAddPeer(peer_id, ret) => {
+                        let _ = ret.send(
+                            self.swarm
+                                .behaviour_mut()
+                                .pubsub()
+                                .add_node_to_partial_view(peer_id),
+                        );
                     }
                     IpfsEvent::PubsubSubscribe(topic, ret) => {
                         let _ = ret.send(self.swarm.behaviour_mut().pubsub().subscribe(topic));
