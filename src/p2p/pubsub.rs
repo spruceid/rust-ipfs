@@ -250,7 +250,7 @@ impl NetworkBehaviour for Pubsub {
     }
 
     fn inject_connected(&mut self, peer_id: &PeerId) {
-        self.floodsub.inject_connected(peer_id)
+        self.floodsub.inject_connected(peer_id);
     }
 
     fn inject_disconnected(&mut self, peer_id: &PeerId) {

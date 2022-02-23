@@ -50,7 +50,12 @@ async fn main() {
 
     // UninitializedIpfs will handle starting up the repository and return the facade (ipfs::Ipfs)
     // and the background task (ipfs::IpfsFuture).
-    let (ipfs, fut): (Ipfs<TestTypes>, _) = opts.create_uninitialised_ipfs().unwrap().start().await.unwrap();
+    let (ipfs, fut): (Ipfs<TestTypes>, _) = opts
+        .create_uninitialised_ipfs()
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
 
     // The background task must be spawned to use anything other than the repository; most notably,
     // the libp2p.
