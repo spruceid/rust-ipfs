@@ -272,6 +272,7 @@ pub enum IpfsEvent {
     /// Request background task to return the listened and external addresses
     GetAddresses(OneshotSender<Vec<Multiaddr>>),
     PubsubAddPeer(PeerId, OneshotSender<()>),
+    PubsubRemovePeer(PeerId, OneshotSender<()>),
     PubsubSubscribe(String, OneshotSender<Option<SubscriptionStream>>),
     PubsubUnsubscribe(String, OneshotSender<bool>),
     PubsubPublish(String, Vec<u8>, OneshotSender<()>),
@@ -829,6 +830,21 @@ impl<Types: IpfsTypes> Ipfs<Types> {
             self.to_task
                 .clone()
                 .send(IpfsEvent::PubsubAddPeer(peer_id, tx))
+                .await?;
+
+            Ok(rx.await?)
+        }
+        .instrument(self.span.clone())
+        .await
+    }
+
+    pub async fn pubsub_remove_peer(&self, peer_id: PeerId) -> Result<(), Error> {
+        async move {
+            let (tx, rx) = oneshot_channel::<()>();
+
+            self.to_task
+                .clone()
+                .send(IpfsEvent::PubsubRemovePeer(peer_id, tx))
                 .await?;
 
             Ok(rx.await?)
@@ -1523,6 +1539,14 @@ impl<TRepoTypes: RepoTypes, Behaviour: NetworkBehaviour<OutEvent = ()>> Future
                                 .behaviour_mut()
                                 .pubsub()
                                 .add_node_to_partial_view(peer_id),
+                        );
+                    }
+                    IpfsEvent::PubsubRemovePeer(peer_id, ret) => {
+                        let _ = ret.send(
+                            self.swarm
+                                .behaviour_mut()
+                                .pubsub()
+                                .remove_node_from_partial_view(&peer_id),
                         );
                     }
                     IpfsEvent::PubsubSubscribe(topic, ret) => {
