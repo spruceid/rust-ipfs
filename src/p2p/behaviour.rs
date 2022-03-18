@@ -11,6 +11,7 @@ use ipfs_bitswap::{Bitswap, BitswapEvent};
 use libipld::multibase::{self, Base};
 use libipld::Cid;
 use libp2p::core::{Multiaddr, PeerId};
+use libp2p::floodsub::FloodsubEvent;
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::kad::record::{store::MemoryStore, Key, Record};
 use libp2p::kad::{Kademlia, KademliaConfig, KademliaEvent, Quorum};
@@ -28,6 +29,7 @@ use tokio::task;
 /// This is the default "custom" behaviour for Ipfs. This is replaced by supplying a custom
 /// behaviour to the [UninitializedIpfs](`crate::UninitializedIpfs`).
 #[derive(Clone, Default, libp2p::NetworkBehaviour)]
+#[behaviour(event_process = true)]
 pub struct NoopBehaviour {
     inner: DummyBehaviour,
 }
@@ -79,10 +81,17 @@ impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> NetworkBehaviour
 {
     fn inject_event(&mut self, _event: ()) {}
 }
+
 impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>>
     NetworkBehaviourEventProcess<void::Void> for Behaviour<Types, Custom>
 {
     fn inject_event(&mut self, _event: void::Void) {}
+}
+
+impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>>
+    NetworkBehaviourEventProcess<FloodsubEvent> for Behaviour<Types, Custom>
+{
+    fn inject_event(&mut self, _event: FloodsubEvent) {}
 }
 
 /*
@@ -537,6 +546,7 @@ impl<Types: IpfsTypes, Custom: NetworkBehaviour<OutEvent = ()>> Behaviour<Types,
             identify: self.identify,
             pubsub: self.pubsub,
             swarm: self.swarm,
+            relay: self.relay,
             custom: new,
         }
     }
