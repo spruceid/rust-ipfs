@@ -14,7 +14,7 @@ prost-build = { default-features = false, version = "0.8" }
 fnv = { default-features = false, version = "1.0" }
 futures = { default-features = false, version = "0.3" }
 hash_hasher = "2.0.3"
-libipld = { version = "0.12" }
+libipld = { version = "0.13" }
 libp2p-core = { default-features = false, version = "0.32" }
 libp2p-swarm = { default-features = false, version = "0.34" }
 multihash = { default-features = false, version = "0.11" }

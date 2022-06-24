@@ -281,7 +281,7 @@ fn ipld_links(
 /// libipld crate. This is on purpose.
 fn dagpb_links(ipld: Ipld) -> Vec<(Option<String>, Cid)> {
     let links = match ipld {
-        Ipld::StringMap(mut m) => m.remove("Links"),
+        Ipld::Map(mut m) => m.remove("Links"),
         // lets assume this means "no links"
         _ => return Vec::new(),
     };
@@ -296,7 +296,7 @@ fn dagpb_links(ipld: Ipld) -> Vec<(Option<String>, Cid)> {
         .enumerate()
         .filter_map(|(i, ipld)| {
             match ipld {
-                Ipld::StringMap(mut m) => {
+                Ipld::Map(mut m) => {
                     let link = match m.remove("Hash") {
                         Some(Ipld::Link(cid)) => cid,
                         Some(x) => panic!(

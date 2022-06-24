@@ -557,7 +557,7 @@ fn resolve_local_ipld<'a>(
             (Ipld::Link(_), Some(_)) => {
                 unreachable!("case already handled above before advancing the iterator")
             }
-            (Ipld::StringMap(mut map), Some(segment)) => {
+            (Ipld::Map(mut map), Some(segment)) => {
                 let found = match map.remove(segment) {
                     Some(f) => f,
                     None => {
